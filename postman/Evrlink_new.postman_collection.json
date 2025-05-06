@@ -1,0 +1,393 @@
+{
+	"info": {
+		"_postman_id": "b3d038b2-7292-4846-9ed3-6d00ae62f85d",
+		"name": "Evrlink_new",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "43463751"
+	},
+	"item": [
+		{
+			"name": "Backgrounds",
+			"item": [
+				{
+					"name": "Mint Background",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"imageURI\": \"https://static.vecteezy.com/system/resources/previews/019/860/272/large_2x/geometric-nature-frame-with-leaves-transparent-background-illustration-png.png\",\n  \"category\": \"Nature\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:3001/api/background/mint",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "background", "mint"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get All Backgrounds",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:3001/api/backgrounds?page=1&limit=10&category=Nature",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "backgrounds"],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "10"
+								},
+								{
+									"key": "category",
+									"value": "Nature"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Popular Backgrounds",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:3001/api/backgrounds/popular",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "backgrounds", "popular"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Gift Cards",
+			"item": [
+				{
+					"name": "Create Gift Card",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"backgroundId\": 1,\n  \"price\": \"0.01\",\n  \"message\": \"Happy Birthday!\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:3001/api/giftcard/create",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "giftcard", "create"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get All Gift Cards",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:3001/api/giftcards?page=1&limit=10&status=available&minPrice=0.01&maxPrice=1.0",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "giftcards"],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "10"
+								},
+								{
+									"key": "status",
+									"value": "available"
+								},
+								{
+									"key": "minPrice",
+									"value": "0.01"
+								},
+								{
+									"key": "maxPrice",
+									"value": "1.0"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Transfer Gift Card",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"giftCardId\": 1,\n  \"recipient\": \"0xRecipientAddress\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:3001/api/giftcard/transfer",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "giftcard", "transfer"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Set Secret Key",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"giftCardId\": 1,\n  \"secret\": \"my-secret-key\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:3001/api/giftcard/set-secret",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "giftcard", "set-secret"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Claim Gift Card",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"giftCardId\": 1,\n  \"secret\": \"my-secret-key\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:3001/api/giftcard/claim",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "giftcard", "claim"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Buy Gift Card",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"giftCardId\": 1,\n  \"message\": \"Enjoy your gift!\",\n  \"price\": \"0.01\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:3001/api/giftcard/buy",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "giftcard", "buy"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Users",
+			"item": [
+				{
+					"name": "Create/Update User",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"walletAddress\": \"0xYourWalletAddress\",\n  \"username\": \"john_doe\",\n  \"email\": \"john@example.com\",\n  \"bio\": \"NFT enthusiast and collector\",\n  \"profileImageUrl\": \"https://example.com/profile.jpg\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:3001/api/user",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "user"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get User Profile",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:3001/api/user/0xYourWalletAddress",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "user", "0xYourWalletAddress"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get All Users",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:3001/api/users?page=1&limit=10&sortBy=totalGiftCardsCreated&sortOrder=DESC",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "users"],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "10"
+								},
+								{
+									"key": "sortBy",
+									"value": "totalGiftCardsCreated"
+								},
+								{
+									"key": "sortOrder",
+									"value": "DESC"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Top Users",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:3001/api/users/top",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "users", "top"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Search Users",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:3001/api/users/search?query=john",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "users", "search"],
+							"query": [
+								{
+									"key": "query",
+									"value": "john"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get User Activity",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:3001/api/users/0xYourWalletAddress/activity",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "users", "0xYourWalletAddress", "activity"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Transactions",
+			"item": [
+				{
+					"name": "Get Recent Transactions",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:3001/api/transactions/recent",
+							"protocol": "http",
+							"host": ["localhost"],
+							"port": "3001",
+							"path": ["api", "transactions", "recent"]
+						}
+					},
+					"response": []
+				}
+			]
+		}
+	]
+}

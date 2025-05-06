@@ -1,0 +1,15 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - npm ci
+  build:
+    commands:
+      - echo Running tests...
+      - npm test
+
+artifacts:
+  files:
+    - '**/*'
+  discard-paths: no
