@@ -32,8 +32,8 @@ app.use(
         imgSrc: [
           "'self'",
           "data:",
-          "http://localhost:3001/",
-          "http://localhost:8001",
+          "https://api.evrlink.com",
+          "https://evrlink.com",
           "*",
         ],
       },
@@ -1516,7 +1516,6 @@ app.get("/api/users/:walletAddress/activity", async (req, res) => {
   }
 });
 
-
 // Get User Profile with Received and Sent Gift Cards
 app.get("/api/profile/:walletAddress", async (req, res) => {
   try {
@@ -1524,7 +1523,7 @@ app.get("/api/profile/:walletAddress", async (req, res) => {
     if (!walletAddress) {
       return res.status(400).json({
         success: false,
-        error: "Wallet address is required"
+        error: "Wallet address is required",
       });
     }
 
@@ -1533,11 +1532,11 @@ app.get("/api/profile/:walletAddress", async (req, res) => {
       where: {
         currentOwner: walletAddress,
         creatorAddress: {
-          [Op.ne]: walletAddress // Not equal to user's address
-        }
+          [Op.ne]: walletAddress, // Not equal to user's address
+        },
       },
       include: [{ model: Background }],
-      order: [["createdAt", "DESC"]]
+      order: [["createdAt", "DESC"]],
     });
 
     // Find sent cards (where user is creator but not current owner)
@@ -1545,11 +1544,11 @@ app.get("/api/profile/:walletAddress", async (req, res) => {
       where: {
         creatorAddress: walletAddress,
         currentOwner: {
-          [Op.ne]: walletAddress // Not equal to user's address
-        }
+          [Op.ne]: walletAddress, // Not equal to user's address
+        },
       },
       include: [{ model: Background }],
-      order: [["createdAt", "DESC"]]
+      order: [["createdAt", "DESC"]],
     });
 
     res.json({
@@ -1557,8 +1556,8 @@ app.get("/api/profile/:walletAddress", async (req, res) => {
       profile: {
         address: walletAddress,
         receivedCards,
-        sentCards
-      }
+        sentCards,
+      },
     });
   } catch (error) {
     handleError(error, res);
