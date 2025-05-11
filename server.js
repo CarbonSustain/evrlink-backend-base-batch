@@ -53,10 +53,15 @@ app.use(limiter);
 
 // CORS configuration for production
 const corsOptions = {
-  origin: process.env.CORS_ORIGINS
-    ? process.env.CORS_ORIGINS.split(",")
-    : ["http://localhost:8001", "http://127.0.0.1:8080, http://localhost:8001"],
-  methods: ["GET", "POST", "OPTIONS"],
+  origin: [
+    "https://evrlink.com",
+    "https://www.evrlink.com",
+    "https://evrlink.io",
+    "https://www.evrlink.io", // Allow requests from this domain
+    "http://localhost:8001",
+    "http://127.0.0.1:8080",
+  ],
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
   exposedHeaders: ["Cross-Origin-Resource-Policy"],
   credentials: true,
