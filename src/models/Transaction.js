@@ -1,6 +1,7 @@
 const { DataTypes } = require('sequelize');
 const sequelize = require('../../db/db_config');
 const GiftCard = require('./GiftCard');
+const User = require("./User");
 
 const Transaction = sequelize.define('Transaction', {
   id: {
@@ -20,7 +21,11 @@ const Transaction = sequelize.define('Transaction', {
   fromAddress: {
     type: DataTypes.STRING,
     field: 'from_address',
-    allowNull: false
+    allowNull: false,
+    references: {
+      model: User,
+      key: 'wallet_address'
+    }
   },
   toAddress: {
     type: DataTypes.STRING,
@@ -34,6 +39,7 @@ const Transaction = sequelize.define('Transaction', {
   },
   amount: {
     type: DataTypes.DECIMAL(10, 4),
+    field: 'amount',
     allowNull: false
   },
   createdAt: {

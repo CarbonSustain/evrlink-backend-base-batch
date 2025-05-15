@@ -20,10 +20,12 @@ const GiftCard = sequelize.define('GiftCard', {
   },
   price: {
     type: DataTypes.DECIMAL(10, 4),
+    field: 'price',
     allowNull: false
   },
   message: {
     type: DataTypes.TEXT,
+    field: 'message',
     allowNull: true
   },
   secretHash: {
