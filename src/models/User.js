@@ -16,6 +16,12 @@ const User = sequelize.define('User', {
     allowNull: false,
     unique: true
   },
+  email: {
+    type: DataTypes.STRING,
+    field: 'email',
+    allowNull: true,
+    unique: true
+  },
   // Only include created_at field since update_at seems to be missing
   createdAt: {
     type: DataTypes.DATE,
