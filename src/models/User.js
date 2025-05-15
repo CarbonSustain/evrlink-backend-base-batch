@@ -21,6 +21,12 @@ const User = sequelize.define('User', {
     type: DataTypes.DATE,
     field: 'created_at',
     defaultValue: sequelize.literal('CURRENT_TIMESTAMP')
+  },
+  user_name: {
+    type: DataTypes.STRING,
+    field: 'user_name',
+    allowNull: false,
+    unique: true
   }
 }, {
   tableName: 'users',
