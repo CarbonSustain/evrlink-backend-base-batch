@@ -19,13 +19,30 @@ const User = sequelize.define('User', {
   email: {
     type: DataTypes.STRING,
     field: 'email',
+<<<<<<< HEAD
     allowNull: true
+=======
+    allowNull: true,
+    unique: true
+>>>>>>> cabaec312f01361fcc0a00c25378f7f2600b4e93
   },
   // Only include created_at field since update_at seems to be missing
   createdAt: {
     type: DataTypes.DATE,
     field: 'created_at',
     defaultValue: sequelize.literal('CURRENT_TIMESTAMP')
+  },
+  user_name: {
+    type: DataTypes.STRING,
+    field: 'user_name',
+    allowNull: false,
+    unique: true
+  },
+  role_id: {
+    type: DataTypes.INTEGER,
+    field: 'role_id',
+    allowNull: false,
+    unique: false
   }
 }, {
   tableName: 'users',
