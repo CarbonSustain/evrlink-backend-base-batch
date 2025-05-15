@@ -4,6 +4,10 @@ const { verifySignature } = require('../utils/crypto');
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = process.env;
+const { verifyToken } = require('../middleware/auth');
+
+// Create Email-Wallet model for mapping emails to wallets
+const EmailWallet = require('../models/EmailWallet');
 
 // Login with wallet - using the most resilient approach possible
 router.post('/login', async (req, res) => {
@@ -279,6 +283,192 @@ router.get('/me', async (req, res) => {
   } catch (error) {
     console.error('Get user error:', error);
     res.status(500).json({ error: 'Failed to get user' });
+  }
+});
+
+// Associate email with wallet address
+router.post('/email-wallet', async (req, res) => {
+  try {
+    console.log('Email-wallet association request received:', req.body);
+    const { email, walletAddress } = req.body;
+    
+    if (!email || !walletAddress) {
+      console.log('Missing email or walletAddress in request');
+      return res.status(400).json({ error: 'Email and wallet address are required' });
+    }
+    
+    // Use raw SQL instead of Sequelize ORM to avoid schema issues
+    const sequelize = User.sequelize;
+    
+    // First, check if the email_wallets table exists
+    try {
+      console.log('Checking if email_wallets table exists...');
+      await sequelize.query('SELECT 1 FROM email_wallets LIMIT 1');
+      console.log('email_wallets table exists');
+    } catch (tableError) {
+      console.log('email_wallets table does not exist, creating it...');
+      try {
+        // Create the email_wallets table
+        await sequelize.query(`
+          CREATE TABLE IF NOT EXISTS email_wallets (
+            id SERIAL PRIMARY KEY,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            wallet_address VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+        console.log('email_wallets table created successfully');
+      } catch (createError) {
+        console.error('Failed to create email_wallets table:', createError);
+        return res.status(500).json({ error: 'Database schema issue: failed to create email_wallets table' });
+      }
+    }
+    
+    // Check if user exists in the users table
+    console.log('Checking if user exists for wallet address:', walletAddress);
+    const users = await sequelize.query(
+      `SELECT id FROM users WHERE wallet_address = $1`,
+      { 
+        bind: [walletAddress],
+        type: sequelize.QueryTypes.SELECT
+      }
+    );
+    
+    // Create user if it doesn't exist
+    if (!users || users.length === 0) {
+      console.log('User not found, creating new user with wallet address:', walletAddress);
+      try {
+        await sequelize.query(
+          `INSERT INTO users (wallet_address) VALUES ($1)`,
+          { 
+            bind: [walletAddress]
+          }
+        );
+        console.log('User created successfully');
+      } catch (userError) {
+        console.error('Error creating user:', userError);
+        // Continue anyway, the association is the important part
+      }
+    } else {
+      console.log('User exists with ID:', users[0].id);
+    }
+    
+    // Check if email is already associated with a wallet
+    console.log('Checking if email is already associated with a wallet:', email);
+    const emailWallets = await sequelize.query(
+      `SELECT id, wallet_address FROM email_wallets WHERE email = $1`,
+      { 
+        bind: [email],
+        type: sequelize.QueryTypes.SELECT
+      }
+    );
+    
+    if (emailWallets && emailWallets.length > 0) {
+      // Update the existing association
+      console.log('Email already associated with wallet, updating to:', walletAddress);
+      await sequelize.query(
+        `UPDATE email_wallets SET wallet_address = $1 WHERE email = $2`,
+        { 
+          bind: [walletAddress, email]
+        }
+      );
+      console.log('Updated email-wallet association');
+    } else {
+      // Create a new association
+      console.log('Creating new email-wallet association');
+      try {
+        await sequelize.query(
+          `INSERT INTO email_wallets (email, wallet_address) VALUES ($1, $2)`,
+          { 
+            bind: [email, walletAddress]
+          }
+        );
+        console.log('Created new email-wallet association');
+      } catch (insertError) {
+        console.error('Error creating email-wallet association:', insertError);
+        
+        // Try another approach with plain SQL if the parameterized query fails
+        try {
+          const sanitizedEmail = email.replace(/'/g, "''");
+          const sanitizedWalletAddress = walletAddress.replace(/'/g, "''");
+          
+          await sequelize.query(
+            `INSERT INTO email_wallets (email, wallet_address) VALUES ('${sanitizedEmail}', '${sanitizedWalletAddress}')`
+          );
+          console.log('Created email-wallet association with plain SQL');
+        } catch (plainError) {
+          console.error('Error with plain SQL insert:', plainError);
+          throw new Error('All insert approaches failed');
+        }
+      }
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        email,
+        walletAddress
+      }
+    });
+  } catch (error) {
+    console.error('Email-wallet association error:', error);
+    res.status(500).json({ error: 'Failed to associate email with wallet: ' + error.message });
+  }
+});
+
+// Get wallet address by email
+router.get('/email-wallet', async (req, res) => {
+  try {
+    console.log('Get wallet by email request received:', req.query);
+    const { email } = req.query;
+    
+    if (!email) {
+      console.log('Missing email in request');
+      return res.status(400).json({ error: 'Email is required' });
+    }
+    
+    // Use raw SQL instead of Sequelize ORM
+    const sequelize = User.sequelize;
+    
+    // Check if the email_wallets table exists
+    try {
+      await sequelize.query('SELECT 1 FROM email_wallets LIMIT 1');
+    } catch (tableError) {
+      console.log('email_wallets table does not exist');
+      return res.status(404).json({ 
+        success: false,
+        error: 'No wallet found for this email'
+      });
+    }
+    
+    // Find email-wallet association
+    const emailWallets = await sequelize.query(
+      `SELECT wallet_address FROM email_wallets WHERE email = $1`,
+      { 
+        bind: [email],
+        type: sequelize.QueryTypes.SELECT
+      }
+    );
+    
+    if (!emailWallets || emailWallets.length === 0) {
+      console.log('No wallet found for email:', email);
+      return res.status(404).json({ 
+        success: false,
+        error: 'No wallet found for this email'
+      });
+    }
+    
+    const walletAddress = emailWallets[0].wallet_address;
+    console.log('Found wallet for email:', email, walletAddress);
+    
+    res.json({
+      success: true,
+      email,
+      walletAddress
+    });
+  } catch (error) {
+    console.error('Get wallet by email error:', error);
+    res.status(500).json({ error: 'Failed to get wallet for email: ' + error.message });
   }
 });
 

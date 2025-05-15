@@ -16,6 +16,11 @@ const User = sequelize.define('User', {
     allowNull: false,
     unique: true
   },
+  email: {
+    type: DataTypes.STRING,
+    field: 'email',
+    allowNull: true
+  },
   // Only include created_at field since update_at seems to be missing
   createdAt: {
     type: DataTypes.DATE,
@@ -37,7 +42,7 @@ User.beforeValidate((user, options) => {
 });
 
 // Log success
-console.log('User model initialized with absolute minimum fields only');
+console.log('User model initialized with minimum fields (id, wallet_address, email, created_at)');
 console.log('User model table name:', User.getTableName());
 
 module.exports = User;
