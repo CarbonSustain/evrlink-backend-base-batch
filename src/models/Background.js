@@ -1,5 +1,6 @@
 const { DataTypes } = require('sequelize');
 const sequelize = require('../../db/db_config');
+const User = require('./User.js');
 
 const Background = sequelize.define('Background', {
   id: {
@@ -20,7 +21,11 @@ const Background = sequelize.define('Background', {
   artistAddress: {
     type: DataTypes.STRING,
     field: 'artist_address',
-    allowNull: true
+    allowNull: true,
+    references: {
+      model: User,
+      key: 'wallet_address'
+    }
   },
   imageURI: {
     type: DataTypes.TEXT,
@@ -34,10 +39,12 @@ const Background = sequelize.define('Background', {
   },
   category: {
     type: DataTypes.STRING,
+    field: 'category',
     allowNull: true
   },
   price: {
     type: DataTypes.STRING,
+    field: 'price',
     allowNull: true
   },
   createdAt: {
