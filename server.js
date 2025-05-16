@@ -720,7 +720,7 @@ app.post("/api/auth/email-wallet", async (req, res) => {
 });
 
 // Associate email with wallet address
-router.post("/email-wallet", async (req, res) => {
+app.post("/email-wallet", async (req, res) => {
   try {
     console.log("Email-wallet association request received:", req.body);
     const { email, walletAddress } = req.body;
@@ -835,7 +835,7 @@ router.post("/email-wallet", async (req, res) => {
 });
 
 // Get wallet address by email
-router.get("/email-wallet", async (req, res) => {
+app.get("/email-wallet", async (req, res) => {
   try {
     console.log("Get wallet by email request received:", req.query);
     const { email } = req.query;
