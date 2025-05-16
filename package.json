@@ -2,10 +2,10 @@
   "name": "evrlink-giftcard-dapp-backend",
   "version": "1.0.0",
   "description": "Combined backend and smart contract system for NFT gift card minting, claiming, and marketplace functionality",
-  "main": "src/app.js",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon src/app.js",
+    "dev": "nodemon server.js",
     "compile": "hardhat compile",
     "test": "hardhat test",
     "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",

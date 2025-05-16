@@ -134,24 +134,26 @@ app.use("/api", apiRoutes);
 
 // Direct handler for email-wallet endpoint in case the regular route isn't working
 app.post("/api/auth/email-wallet", async (req, res) => {
-  console.log('Direct email-wallet association request received:', req.body);
+  console.log("Direct email-wallet association request received:", req.body);
   const { email, walletAddress } = req.body;
-  
+
   if (!email || !walletAddress) {
-    console.log('Missing email or walletAddress in request');
-    return res.status(400).json({ error: 'Email and wallet address are required' });
+    console.log("Missing email or walletAddress in request");
+    return res
+      .status(400)
+      .json({ error: "Email and wallet address are required" });
   }
-  
+
   try {
     // Use raw SQL to create the email_wallets table if it doesn't exist
-    const sequelize = require('./db/db_config');
-    
+    const sequelize = require("./db/db_config");
+
     try {
-      console.log('Checking if email_wallets table exists...');
-      await sequelize.query('SELECT 1 FROM email_wallets LIMIT 1');
-      console.log('email_wallets table exists');
+      console.log("Checking if email_wallets table exists...");
+      await sequelize.query("SELECT 1 FROM email_wallets LIMIT 1");
+      console.log("email_wallets table exists");
     } catch (tableError) {
-      console.log('email_wallets table does not exist, creating it...');
+      console.log("email_wallets table does not exist, creating it...");
       try {
         // Create the email_wallets table
         await sequelize.query(`
@@ -162,182 +164,204 @@ app.post("/api/auth/email-wallet", async (req, res) => {
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
           );
         `);
-        console.log('email_wallets table created successfully');
+        console.log("email_wallets table created successfully");
       } catch (createError) {
-        console.error('Failed to create email_wallets table:', createError);
-        return res.status(500).json({ error: 'Database schema issue: failed to create email_wallets table' });
+        console.error("Failed to create email_wallets table:", createError);
+        return res.status(500).json({
+          error: "Database schema issue: failed to create email_wallets table",
+        });
       }
     }
-    
+
     // Check if user exists in the users table - use the User model
-    console.log('Checking if user exists for wallet address:', walletAddress);
+    console.log("Checking if user exists for wallet address:", walletAddress);
     let user = await User.findOne({ where: { walletAddress } });
-    
+
     // Create user if it doesn't exist
     if (!user) {
-      console.log('User not found, creating new user with wallet address:', walletAddress);
+      console.log(
+        "User not found, creating new user with wallet address:",
+        walletAddress
+      );
       try {
         // Create user with the User model
         user = await User.create({
           walletAddress,
-          email: email // Store email directly in the user model
+          email: email, // Store email directly in the user model
         });
-        console.log('User created successfully with email:', email);
+        console.log("User created successfully with email:", email);
       } catch (userError) {
-        console.error('Error creating user:', userError);
+        console.error("Error creating user:", userError);
         // Continue anyway, attempt legacy approach
         try {
           await sequelize.query(
             `INSERT INTO users (wallet_address) VALUES ($1)`,
-            { 
-              bind: [walletAddress]
+            {
+              bind: [walletAddress],
             }
           );
-          console.log('User created with legacy approach');
+          console.log("User created with legacy approach");
         } catch (legacyError) {
-          console.error('Error in legacy user creation:', legacyError);
+          console.error("Error in legacy user creation:", legacyError);
         }
       }
     } else {
       // Update existing user with email
-      console.log('User exists, updating with email:', email);
+      console.log("User exists, updating with email:", email);
       try {
         await user.update({ email });
-        console.log('User email updated successfully');
+        console.log("User email updated successfully");
       } catch (updateError) {
-        console.error('Error updating user email:', updateError);
+        console.error("Error updating user email:", updateError);
       }
     }
-    
+
     // Continue with the email_wallets association for backward compatibility
-    console.log('Checking if email is already associated with a wallet:', email);
+    console.log(
+      "Checking if email is already associated with a wallet:",
+      email
+    );
     const emailWallets = await sequelize.query(
       `SELECT id, wallet_address FROM email_wallets WHERE email = $1`,
-      { 
+      {
         bind: [email],
-        type: sequelize.QueryTypes.SELECT
+        type: sequelize.QueryTypes.SELECT,
       }
     );
-    
+
     if (emailWallets && emailWallets.length > 0) {
       // Update the existing association
-      console.log('Email already associated with wallet, updating to:', walletAddress);
+      console.log(
+        "Email already associated with wallet, updating to:",
+        walletAddress
+      );
       await sequelize.query(
         `UPDATE email_wallets SET wallet_address = $1 WHERE email = $2`,
-        { 
-          bind: [walletAddress, email]
+        {
+          bind: [walletAddress, email],
         }
       );
-      console.log('Updated email-wallet association');
+      console.log("Updated email-wallet association");
     } else {
       // Create a new association
-      console.log('Creating new email-wallet association');
+      console.log("Creating new email-wallet association");
       try {
         await sequelize.query(
           `INSERT INTO email_wallets (email, wallet_address) VALUES ($1, $2)`,
-          { 
-            bind: [email, walletAddress]
+          {
+            bind: [email, walletAddress],
           }
         );
-        console.log('Created new email-wallet association');
+        console.log("Created new email-wallet association");
       } catch (insertError) {
-        console.error('Error creating email-wallet association:', insertError);
-        
+        console.error("Error creating email-wallet association:", insertError);
+
         // Try another approach with plain SQL if the parameterized query fails
         try {
           const sanitizedEmail = email.replace(/'/g, "''");
           const sanitizedWalletAddress = walletAddress.replace(/'/g, "''");
-          
+
           await sequelize.query(
             `INSERT INTO email_wallets (email, wallet_address) VALUES ('${sanitizedEmail}', '${sanitizedWalletAddress}')`
           );
-          console.log('Created email-wallet association with plain SQL');
+          console.log("Created email-wallet association with plain SQL");
         } catch (plainError) {
-          console.error('Error with plain SQL insert:', plainError);
-          throw new Error('All insert approaches failed');
+          console.error("Error with plain SQL insert:", plainError);
+          throw new Error("All insert approaches failed");
         }
       }
     }
-    
+
     res.json({
       success: true,
       data: {
         email,
-        walletAddress
-      }
+        walletAddress,
+      },
     });
   } catch (error) {
-    console.error('Email-wallet association error:', error);
-    res.status(500).json({ error: 'Failed to associate email with wallet: ' + error.message });
+    console.error("Email-wallet association error:", error);
+    res.status(500).json({
+      error: "Failed to associate email with wallet: " + error.message,
+    });
   }
 });
 
 // Direct handler for GET email-wallet endpoint
 app.get("/api/auth/email-wallet", async (req, res) => {
-  console.log('Direct get wallet by email request received:', req.query);
+  console.log("Direct get wallet by email request received:", req.query);
   const { email } = req.query;
-  
+
   if (!email) {
-    console.log('Missing email in request');
-    return res.status(400).json({ error: 'Email is required' });
+    console.log("Missing email in request");
+    return res.status(400).json({ error: "Email is required" });
   }
-  
+
   try {
     // First try to find user by email in the User model
     const user = await User.findOne({ where: { email } });
-    
+
     if (user) {
-      console.log('Found user with matching email in users table:', user.walletAddress);
+      console.log(
+        "Found user with matching email in users table:",
+        user.walletAddress
+      );
       return res.json({
         success: true,
         email,
-        walletAddress: user.walletAddress
+        walletAddress: user.walletAddress,
       });
     }
-    
+
     // If not found in users table, check email_wallets table (legacy approach)
-    console.log('User not found in users table, checking email_wallets table');
-    const sequelize = require('./db/db_config');
-    
+    console.log("User not found in users table, checking email_wallets table");
+    const sequelize = require("./db/db_config");
+
     // Check if the email_wallets table exists
     try {
-      await sequelize.query('SELECT 1 FROM email_wallets LIMIT 1');
+      await sequelize.query("SELECT 1 FROM email_wallets LIMIT 1");
     } catch (tableError) {
-      console.log('email_wallets table does not exist');
-      return res.status(404).json({ 
+      console.log("email_wallets table does not exist");
+      return res.status(404).json({
         success: false,
-        error: 'No wallet found for this email'
+        error: "No wallet found for this email",
       });
     }
-    
+
     // Find email-wallet association
     const emailWallets = await sequelize.query(
       `SELECT wallet_address FROM email_wallets WHERE email = $1`,
-      { 
+      {
         bind: [email],
-        type: sequelize.QueryTypes.SELECT
+        type: sequelize.QueryTypes.SELECT,
       }
     );
-    
+
     if (!emailWallets || emailWallets.length === 0) {
-      console.log('No wallet found for email:', email);
-      return res.status(404).json({ 
+      console.log("No wallet found for email:", email);
+      return res.status(404).json({
         success: false,
-        error: 'No wallet found for this email'
+        error: "No wallet found for this email",
       });
     }
-    
+
     const walletAddress = emailWallets[0].wallet_address;
-    console.log('Found wallet for email in email_wallets table:', email, walletAddress);
-    
+    console.log(
+      "Found wallet for email in email_wallets table:",
+      email,
+      walletAddress
+    );
+
     res.json({
       success: true,
       email,
-      walletAddress
+      walletAddress,
     });
   } catch (error) {
-    console.error('Get wallet by email error:', error);
-    res.status(500).json({ error: 'Failed to get wallet for email: ' + error.message });
+    console.error("Get wallet by email error:", error);
+    res
+      .status(500)
+      .json({ error: "Failed to get wallet for email: " + error.message });
   }
 });
 
@@ -551,7 +575,7 @@ app.post("/api/backgrounds", upload.single("image"), async (req, res) => {
       imageURI: imageUrl,
       category,
       price,
-      usageCount: 0
+      usageCount: 0,
     });
 
     // Mint on blockchain with new contract logic
@@ -576,7 +600,7 @@ app.post("/api/backgrounds", upload.single("image"), async (req, res) => {
       const backgroundId = event.args.backgroundId.toString();
       await localBackground.update({
         blockchainId: backgroundId,
-        blockchainTxHash: tx.hash
+        blockchainTxHash: tx.hash,
       });
     } else {
       console.warn("BackgroundMinted event not found in transaction receipt");
@@ -649,7 +673,54 @@ app.post("/api/background/mint", async (req, res) => {
     res.json({
       success: true,
       transactionHash: tx.hash,
+      etherscanUrl: `https://sepolia.etherscan.io/tx/${transactionHash}`,
+      giftCardId,
+      giftCard,
+    });
+  } catch (error) {
+    handleError(error, res);
+  }
+});
+
+// Calculate required ETH for minting a gift card
+app.post("/api/giftcard/price", async (req, res) => {
+  try {
+    const { backgroundId, price } = req.body;
+    if (!backgroundId || !price) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing required fields: backgroundId and price are required.",
+      });
+    }
+
+    // Optionally verify background exists
+    const background = await Background.findByPk(backgroundId);
+    if (!background) {
+      return res.status(404).json({
+        success: false,
+        error: "Background not found with the given ID.",
+      });
+    }
+
+    const backgroundPrice = ethers.parseEther(price.toString());
+    const PLATFORM_FEE_IN_WEI = BigInt("611111111111111");
+    const taxFee = (backgroundPrice * 4n) / 100n;
+    const climateFee = backgroundPrice / 100n;
+    const totalRequired =
+      backgroundPrice + PLATFORM_FEE_IN_WEI + taxFee + climateFee;
+
+    res.json({
+      success: true,
       backgroundId,
+      price: price.toString(),
+      breakdown: {
+        backgroundPrice: backgroundPrice.toString(),
+        platformFee: PLATFORM_FEE_IN_WEI.toString(),
+        taxFee: taxFee.toString(),
+        climateFee: climateFee.toString(),
+      },
+      totalRequired: totalRequired.toString(),
+      totalRequiredEth: ethers.formatEther(totalRequired),
     });
   } catch (error) {
     handleError(error, res);
@@ -738,79 +809,120 @@ app.post(
         });
       }
 
-      let giftCardId;
-      let transactionHash;
-
-      // Check if blockchain functionality is enabled and contract is available
-      if (blockchainEnabled && contract) {
-        console.log("🔹 Creating Gift Card on blockchain:", {
-          backgroundId,
-          price,
-          message,
-        });
-        try {
-          // Calculate total required ETH as per contract logic
-          const backgroundPrice = ethers.parseEther(price.toString());
-          const PLATFORM_FEE_IN_WEI = ethers.BigInt("611111111111111");
-          const taxFee = backgroundPrice * 4n / 100n;
-          const climateFee = backgroundPrice / 100n;
-          const totalRequired = backgroundPrice + PLATFORM_FEE_IN_WEI + taxFee + climateFee;
-
-          const tx = await contract.createGiftCard(
-            backgroundId,
-            message,
-            { value: totalRequired }
-          );
-          const receipt = await tx.wait();
-          console.log("🔍 Transaction Receipt:", receipt);
-
-          const event = receipt.logs.find(
-            (log) => log.fragment && log.fragment.name === "GiftCardCreated"
-          );
-          if (!event) {
-            throw new Error(
-              "GiftCardCreated event not found in transaction receipt."
-            );
-          }
-          giftCardId = event.args.giftCardId.toString();
-          transactionHash = receipt.hash;
-        } catch (error) {
-          console.error("Blockchain transaction failed:", error);
-          // Continue with database-only creation
-          giftCardId = `GC_${Date.now()}_${Math.random()
-            .toString(36)
-            .substr(2, 9)}`;
-        }
-      } else {
-        // Generate a unique ID for database-only creation
-        giftCardId = `GC_${Date.now()}_${Math.random()
-          .toString(36)
-          .substr(2, 9)}`;
-        console.log("🔹 Creating Gift Card in database only:", {
-          giftCardId,
-          backgroundId,
-          price,
-          message,
+      // Require blockchain to be enabled for gift card creation
+      if (!blockchainEnabled || !contract) {
+        return res.status(503).json({
+          success: false,
+          error:
+            "Blockchain is not enabled. Gift card creation requires blockchain connectivity.",
         });
       }
 
-      // Increment background usage count
-      await background.increment("usageCount");
-      await background.save();
+      let giftCardId;
+      let transactionHash;
 
-      // Get the creator's wallet address from the request
-      const creatorAddress = req.headers.authorization
-        ? jwt.verify(
-            req.headers.authorization.split(" ")[1],
-            process.env.JWT_SECRET
-          ).walletAddress
-        : wallet.address;
+      // Calculate total required ETH as per contract logic
+      const backgroundPrice = ethers.parseEther(price.toString());
+      const PLATFORM_FEE_IN_WEI = BigInt("611111111111111");
+      const taxFee = (backgroundPrice * 4n) / 100n;
+      const climateFee = backgroundPrice / 100n;
+      const totalRequired =
+        backgroundPrice + PLATFORM_FEE_IN_WEI + taxFee + climateFee;
 
-      // Save to database using Sequelize
+      // Create Gift Card on blockchain
+      console.log("🔹 Creating Gift Card on blockchain:", {
+        backgroundId,
+        price,
+        message,
+      });
+      let receipt;
+      try {
+        const tx = await contract.createGiftCard(backgroundId, message, {
+          value: totalRequired,
+        });
+        receipt = await tx.wait();
+
+        const event = receipt.logs.find(
+          (log) => log.fragment && log.fragment.name === "GiftCardCreated"
+        );
+        if (!event) {
+          const errMsg =
+            "GiftCardCreated event not found in transaction receipt. Possible ABI mismatch or contract did not emit event.";
+          console.error(errMsg);
+          throw new Error(errMsg);
+        }
+        giftCardId = event.args.giftCardId.toString();
+        transactionHash = receipt.hash;
+      } catch (error) {
+        // Enhanced error handling for blockchain failures
+        let debugMsg = "Blockchain error: ";
+        if (
+          error.code === "INSUFFICIENT_FUNDS" ||
+          (error.reason && error.reason.includes("insufficient funds"))
+        ) {
+          debugMsg +=
+            "Insufficient ETH sent. Please ensure the totalRequired amount is sent.";
+        } else if (
+          error.code === "CALL_EXCEPTION" ||
+          (error.reason && error.reason.includes("revert"))
+        ) {
+          debugMsg +=
+            "Smart contract reverted. Check if backgroundId exists and all require() conditions are met.";
+        } else if (
+          error.code === "UNPREDICTABLE_GAS_LIMIT" ||
+          (error.message && error.message.includes("out of gas"))
+        ) {
+          debugMsg +=
+            "Transaction ran out of gas. Try increasing the gas limit.";
+        } else if (
+          error.code === "NETWORK_ERROR" ||
+          (error.message && error.message.includes("network"))
+        ) {
+          debugMsg +=
+            "Network/provider error. Check your RPC provider (e.g., Alchemy/Infura) and network status.";
+        } else if (
+          error.code === "INVALID_ARGUMENT" ||
+          (error.message && error.message.includes("invalid argument"))
+        ) {
+          debugMsg +=
+            "Invalid argument sent to contract. Check contract ABI and input types.";
+        } else if (
+          error.code === "NONCE_EXPIRED" ||
+          (error.message && error.message.includes("nonce"))
+        ) {
+          debugMsg += "Nonce issue. Try resetting the backend wallet nonce.";
+        } else if (
+          error.code === "ACTION_REJECTED" ||
+          (error.message && error.message.includes("rejected"))
+        ) {
+          debugMsg += "Transaction was rejected by the wallet or network.";
+        } else if (
+          error.code === "SERVER_ERROR" ||
+          (error.message && error.message.includes("server error"))
+        ) {
+          debugMsg += "Server error from RPC provider.";
+        } else if (error.message && error.message.includes("event not found")) {
+          debugMsg +=
+            "Event not found in transaction receipt. Check contract ABI and event emission.";
+        } else if (error.message && error.message.includes("private key")) {
+          debugMsg +=
+            "Wallet/private key error. Check backend wallet configuration and funding.";
+        } else {
+          debugMsg += error.message || "Unknown blockchain error.";
+        }
+        console.error(debugMsg, error);
+        return res.status(500).json({
+          success: false,
+          error: debugMsg,
+          details: error.stack || error,
+        });
+      }
+
+      // Only save to DB if blockchain succeeded
       const giftCard = await GiftCard.create({
         id: giftCardId,
         backgroundId,
-        price: price.toString(),
+        price: totalRequired.toString(), // Store the actual ETH collected
         message,
         isClaimable: true,
         creatorAddress,
@@ -818,9 +930,14 @@ app.post(
         transactionHash,
       });
 
+      // Increment background usage count
+      await background.increment("usageCount");
+      await background.save();
+
       res.json({
         success: true,
         transactionHash,
+        etherscanUrl: `https://sepolia.etherscan.io/tx/${transactionHash}`,
         giftCardId,
         giftCard,
       });
@@ -937,10 +1054,22 @@ app.post("/api/giftcard/transfer", async (req, res) => {
       });
     }
 
+    // Call the smart contract to transfer the gift card on-chain
     const tx = await contract.transferGiftCard(giftCardId, recipient);
     const receipt = await tx.wait();
 
-    // Update database
+    // Find the GiftCardTransferred event in the logs (optional, if your contract emits it)
+    const event = receipt.logs.find(
+      (log) => log.fragment && log.fragment.name === "GiftCardTransferred"
+    );
+    if (!event) {
+      // Optionally warn, but still proceed if the transaction succeeded
+      console.warn(
+        "GiftCardTransferred event not found in transaction receipt"
+      );
+    }
+
+    // Update database only after successful on-chain transfer
     const giftCard = await GiftCard.findByPk(giftCardId);
     if (giftCard) {
       await giftCard.update({ currentOwner: recipient });
@@ -952,6 +1081,7 @@ app.post("/api/giftcard/transfer", async (req, res) => {
         toAddress: recipient,
         transactionType: "TRANSFER",
         amount: 0,
+        transactionHash: tx.hash,
       });
     }
 
@@ -959,7 +1089,11 @@ app.post("/api/giftcard/transfer", async (req, res) => {
       updateUserStats(wallet.address),
       updateUserStats(recipient),
     ]);
-    res.json({ success: true, transactionHash: tx.hash });
+    res.json({
+      success: true,
+      transactionHash: tx.hash,
+      etherscanUrl: `https://sepolia.etherscan.io/tx/${tx.hash}`,
+    });
   } catch (error) {
     handleError(error, res);
   }
@@ -1033,7 +1167,7 @@ app.post("/api/giftcard/claim", async (req, res) => {
       });
     }
 
-    console.log("🔹 Claiming Gift Card:", { giftCardId });
+    console.log("🔹 Claiming Gift Card on blockchain:", { giftCardId });
     const tx = await contract.claimGiftCard(giftCardId, secret);
     const receipt = await tx.wait();
     console.log("🔍 Transaction Receipt:", receipt);
@@ -1049,7 +1183,7 @@ app.post("/api/giftcard/claim", async (req, res) => {
       });
     }
 
-    // Update database
+    // Only update DB if on-chain claim succeeded
     const giftCard = await GiftCard.findByPk(giftCardId);
     if (giftCard) {
       await giftCard.update({
@@ -1065,6 +1199,7 @@ app.post("/api/giftcard/claim", async (req, res) => {
         toAddress: wallet.address,
         transactionType: "CLAIM",
         amount: 0,
+        transactionHash: tx.hash,
       });
     }
 
@@ -1072,7 +1207,11 @@ app.post("/api/giftcard/claim", async (req, res) => {
       updateUserStats(wallet.address),
       updateUserStats(giftCard.creatorAddress),
     ]);
-    res.json({ success: true, transactionHash: tx.hash });
+    res.json({
+      success: true,
+      transactionHash: tx.hash,
+      etherscanUrl: `https://sepolia.etherscan.io/tx/${tx.hash}`,
+    });
   } catch (error) {
     handleError(error, res);
   }
