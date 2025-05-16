@@ -156,7 +156,7 @@ router.post("/", verifyToken, upload.single("image"), async (req, res) => {
     // Generate URL based on server configuration
     const protocol = req.secure ? "https" : "http";
     const host = req.get("host");
-    const imageUrl = `https://${process.env.S3_BUCKET_NAME}.s3.us-west-2.amazonaws.com/${req.file.filename}`;
+    const imageUrl = `https://${process.env.S3_BUCKET_NAME}.s3.us-west-2.amazonaws.com/${req.fileName}`;
 
     console.log("Creating background with:", {
       imageUrl,

@@ -543,7 +543,7 @@ app.post("/api/backgrounds", upload.single("image"), async (req, res) => {
     }
 
     // Construct image URL (adjust as per your storage setup)
-    const imageUrl = `https://${process.env.S3_BUCKET_NAME}.s3.us-west-2.amazonaws.com/${imageFile.filename}`;
+    const imageUrl = `https://${process.env.S3_BUCKET_NAME}.s3.us-west-2.amazonaws.com/${req.fileName}`;
 
     // Create DB record first
     const localBackground = await Background.create({
