@@ -19,6 +19,7 @@ const User = require("./src/models/User");
 
 // Import API routes
 const apiRoutes = require("./src/routes");
+const chatbotRoutes = require("./src/routes/chatbot.routes");
 
 const app = express();
 
@@ -164,6 +165,10 @@ app.post('/api/agent', async (req, res) => {
 
 // Mount API routes
 app.use("/api", apiRoutes);
+app.use("/api/chatbot", chatbotRoutes);
+
+// Log registered routes
+console.log('Registered chatbot routes for role-based access control');
 
 // Initialize blockchain and agent
 let contract = null;

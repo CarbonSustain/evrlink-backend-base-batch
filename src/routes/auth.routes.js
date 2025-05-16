@@ -87,9 +87,9 @@ router.post('/login', async (req, res) => {
         }
       }
       
-      // Check if user exists with this wallet address
+      // Check if user exists with this wallet address and get their role_id
       const existingUsers = await sequelize.query(
-        `SELECT id, wallet_address FROM users WHERE wallet_address = $1`,
+        `SELECT id, wallet_address, role_id FROM users WHERE wallet_address = $1`,
         { 
           bind: [address],
           type: sequelize.QueryTypes.SELECT
@@ -97,11 +97,13 @@ router.post('/login', async (req, res) => {
       );
       
       let userId;
+      let roleId;
       
-      // If user exists, use their ID
+      // If user exists, use their ID and role
       if (existingUsers && existingUsers.length > 0) {
         userId = existingUsers[0].id;
-        console.log(`Found existing user: ${userId}`);
+        roleId = existingUsers[0].role_id || 1; // Default to role_id 1 if not set
+        console.log(`Found existing user: ${userId} with role: ${roleId}`);
       } else {
         // Handle user creation
         console.log('User not found, creating new user with complex INSERT');
@@ -199,20 +201,22 @@ router.post('/login', async (req, res) => {
         throw new Error('Failed to get or create user account');
     }
 
-    // Generate JWT token
+    // Generate JWT token with role_id
     const token = jwt.sign({ 
         userId,
-        walletAddress: address
+        walletAddress: address,
+        roleId: roleId || 1 // Include role_id in token, default to 1 if not set
     }, JWT_SECRET, { expiresIn: '24h' });
 
       console.log(`JWT token generated for user: ${userId}`);
       
-      // Return minimal user info
+      // Return user info with role_id
     res.json({
       token,
       user: {
           id: userId,
-          walletAddress: address
+          walletAddress: address,
+          roleId: roleId || 1 // Include role_id in response, default to 1 if not set
         }
       });
     } catch (dbError) {
@@ -231,12 +235,13 @@ router.post('/login', async (req, res) => {
       
       console.log('Created fallback JWT token for development');
       
-      // Return minimal user info
+      // Return minimal user info with default role_id
       return res.json({
         token,
         user: {
           id: parseInt(address.substring(2, 10), 16) % 1000000,
-          walletAddress: address
+          walletAddress: address,
+          roleId: 1 // Default role for fallback authentication to offline chatbot
         },
         warning: 'Using fallback authentication due to database issues. Limited functionality available.'
       });
@@ -259,7 +264,7 @@ router.get('/me', async (req, res) => {
     
     // Use the same parameter style as login endpoint for consistency
     const users = await sequelize.query(
-      `SELECT id, wallet_address FROM users WHERE id = $1`,
+      `SELECT id, wallet_address, role_id FROM users WHERE id = $1`,
       { 
         bind: [req.user.userId],
         type: sequelize.QueryTypes.SELECT
@@ -275,7 +280,8 @@ router.get('/me', async (req, res) => {
     const user = users[0];
     res.json({
       id: user.id,
-      walletAddress: user.wallet_address
+      walletAddress: user.wallet_address,
+      roleId: user.role_id || 1 // Include role_id in response, default to 1 if not set
     });
   } catch (error) {
     console.error('Get user error:', error);
