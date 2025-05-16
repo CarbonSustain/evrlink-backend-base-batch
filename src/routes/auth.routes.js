@@ -115,19 +115,18 @@ router.post('/login', async (req, res) => {
           
           // Try PostgreSQL-style parameters first
           try {
+            // Include default role_id of 1 for new users
             const insertResult = await sequelize.query(
-              `INSERT INTO users (wallet_address) VALUES ($1) RETURNING id;`,
+              `INSERT INTO users (wallet_address, role_id) VALUES ($1, $2) RETURNING id`,
               { 
-                bind: [address],
+                bind: [address, 1], // Default role_id is 1
                 type: sequelize.QueryTypes.SELECT
               }
             );
             
-            console.log('PostgreSQL insert result:', JSON.stringify(insertResult));
-            
             if (insertResult && insertResult.length > 0) {
               userId = insertResult[0].id;
-              console.log('User created successfully with PostgreSQL-style, ID:', userId);
+              console.log(`Created new user with ID: ${userId} and default role_id: 1`);
               return userId;
             }
           } catch (pgError) {
@@ -139,26 +138,24 @@ router.post('/login', async (req, res) => {
           try {
             console.log('Trying standard question-mark parameters...');
             await sequelize.query(
-              `INSERT INTO users (wallet_address) VALUES (?)`,
+              `INSERT INTO users (wallet_address, role_id) VALUES (?, ?)`,
               { 
-                replacements: [address]
+                replacements: [address, 1] // Default role_id is 1
               }
             );
             
-            // Fetch the ID
-            const selectResult = await sequelize.query(
-              `SELECT id FROM users WHERE wallet_address = ? ORDER BY id DESC LIMIT 1`,
+            // Get the ID of the inserted user
+            const newUser = await sequelize.query(
+              `SELECT id FROM users WHERE wallet_address = ?`,
               { 
                 replacements: [address],
                 type: sequelize.QueryTypes.SELECT
               }
             );
             
-            console.log('Question-mark parameter select result:', JSON.stringify(selectResult));
-            
-            if (selectResult && selectResult.length > 0) {
-              userId = selectResult[0].id;
-              console.log('User created with question-mark parameters, ID:', userId);
+            if (newUser && newUser.length > 0) {
+              userId = newUser[0].id;
+              console.log(`Created new user with ID: ${userId} and default role_id: 1`);
               return userId;
             }
           } catch (qMarkError) {
@@ -171,20 +168,21 @@ router.post('/login', async (req, res) => {
             console.log('Trying plain SQL as last resort...');
             // Directly interpolate value - not usually recommended but as last resort
             // Sanitize the address input first
-            const sanitizedAddress = address.replace(/'/g, "''"); // SQL escape single quotes
+            const sanitizedAddress = address.replace(/'/g, "''");
+            
             await sequelize.query(
-              `INSERT INTO users (wallet_address) VALUES ('${sanitizedAddress}') RETURNING id`
+              `INSERT INTO users (wallet_address, role_id) VALUES ('${sanitizedAddress}', 1)`
             );
             
-            const plainResult = await sequelize.query(
-              `SELECT id FROM users WHERE wallet_address = '${sanitizedAddress}' LIMIT 1`
+            // Get the ID of the inserted user
+            const newUser = await sequelize.query(
+              `SELECT id FROM users WHERE wallet_address = '${sanitizedAddress}'`,
+              { type: sequelize.QueryTypes.SELECT }
             );
             
-            console.log('Plain SQL result:', JSON.stringify(plainResult));
-            
-            if (plainResult && plainResult[0] && plainResult[0].length > 0) {
-              userId = plainResult[0][0].id;
-              console.log('User created with plain SQL, ID:', userId);
+            if (newUser && newUser.length > 0) {
+              userId = newUser[0].id;
+              console.log(`Created new user with ID: ${userId} and default role_id: 1`);
               return userId;
             }
           } catch (plainError) {
@@ -469,6 +467,128 @@ router.get('/email-wallet', async (req, res) => {
   } catch (error) {
     console.error('Get wallet by email error:', error);
     res.status(500).json({ error: 'Failed to get wallet for email: ' + error.message });
+  }
+});
+
+// Login with email
+router.post('/login-email', async (req, res) => {
+  try {
+    console.log('Login with email request received:', req.body);
+    const { email } = req.body;
+    
+    if (!email) {
+      console.log('Missing email in request');
+      return res.status(400).json({ error: 'Email is required' });
+    }
+    
+    // Use raw SQL instead of Sequelize ORM
+    const sequelize = User.sequelize;
+    
+    // Check if the email is associated with a wallet
+    try {
+      // Check if the email_wallets table exists
+      try {
+        await sequelize.query('SELECT 1 FROM email_wallets LIMIT 1');
+      } catch (tableError) {
+        console.log('email_wallets table does not exist, creating it...');
+        await sequelize.query(`
+          CREATE TABLE IF NOT EXISTS email_wallets (
+            id SERIAL PRIMARY KEY,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            wallet_address VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+      }
+      
+      // Find email-wallet association
+      const emailWallets = await sequelize.query(
+        `SELECT wallet_address FROM email_wallets WHERE email = $1`,
+        { 
+          bind: [email],
+          type: sequelize.QueryTypes.SELECT
+        }
+      );
+      
+      if (!emailWallets || emailWallets.length === 0) {
+        console.log('No wallet found for email:', email);
+        return res.status(404).json({ 
+          success: false,
+          error: 'No wallet found for this email'
+        });
+      }
+      
+      const walletAddress = emailWallets[0].wallet_address;
+      console.log('Found wallet for email:', email, walletAddress);
+      
+      // Now login with the wallet address (create a mock signature)
+      const signature = `mock_signature_for_${walletAddress}`;
+      
+      // Check if user exists with this wallet address
+      const existingUsers = await sequelize.query(
+        `SELECT id FROM users WHERE wallet_address = $1`,
+        { 
+          bind: [walletAddress],
+          type: sequelize.QueryTypes.SELECT
+        }
+      );
+      
+      let userId;
+      
+      // If user exists, use their ID
+      if (existingUsers && existingUsers.length > 0) {
+        userId = existingUsers[0].id;
+        console.log(`Found existing user: ${userId}`);
+      } else {
+        // Create a new user with this wallet address and default role_id of 1
+        console.log('User not found, creating new user with wallet address:', walletAddress);
+        
+        try {
+          const insertResult = await sequelize.query(
+            `INSERT INTO users (wallet_address, role_id, email) VALUES ($1, $2, $3) RETURNING id`,
+            { 
+              bind: [walletAddress, 1, email], // Default role_id is 1
+              type: sequelize.QueryTypes.SELECT
+            }
+          );
+          
+          if (insertResult && insertResult.length > 0) {
+            userId = insertResult[0].id;
+            console.log(`Created new user with ID: ${userId} and default role_id: 1`);
+          } else {
+            throw new Error('Failed to create user');
+          }
+        } catch (insertError) {
+          console.error('Error inserting user:', insertError);
+          throw new Error('Failed to create user in database: ' + insertError.message);
+        }
+      }
+      
+      // Generate JWT token
+      const token = jwt.sign({ 
+        userId,
+        walletAddress
+      }, JWT_SECRET, { expiresIn: '24h' });
+      
+      console.log(`JWT token generated for user: ${userId}`);
+      
+      // Return user info with token
+      res.json({
+        token,
+        user: {
+          id: userId,
+          walletAddress,
+          email
+        }
+      });
+      
+    } catch (error) {
+      console.error('Email login error:', error);
+      res.status(500).json({ error: 'Login failed: ' + error.message });
+    }
+  } catch (error) {
+    console.error('Login with email error:', error);
+    res.status(500).json({ error: 'Login failed: ' + error.message });
   }
 });
 

@@ -20,7 +20,8 @@ router.post('/', verifyToken, async (req, res) => {
         username,
         email,
         bio,
-        profileImageUrl
+        profileImageUrl,
+        role_id: 1 // Default role_id is 1
       }
     });
     
