@@ -17,39 +17,46 @@ contract NFTGiftMarketplace is ERC721URIStorage, Ownable {
     struct GiftCard {
         address creator;
         address currentOwner;
-        uint256 price;
+        uint128 price;
         string message;
         bytes32 secretHash;
-        uint256 backgroundId; // Reference to the background NFT
-        bool isClaimable; // Indicates if the gift card is claimable
+        uint32 backgroundId;
     }
 
     struct Background {
         address artist;
         string imageURI;
-        string category; // New field for category
-        uint256 usageCount;
+        string category;
+        uint128 price;
     }
 
-    mapping(uint256 => GiftCard) public giftCards; // Gift cards are stored in the contract
-    mapping(uint256 => Background) public backgrounds; // Background NFTs
-    mapping(bytes32 => bool) private hashUsed;
-    mapping(string => bool) private mintedURIs; // Track minted image URIs
+    mapping(uint32 => GiftCard) public giftCards;
+    mapping(uint32 => Background) public backgrounds;
+    mapping(string => bool) private mintedURIs;
 
-    event BackgroundMinted(uint256 indexed backgroundId, address indexed artist, string imageURI, string category);
-    event GiftCardCreated(uint256 indexed giftCardId, address indexed creator, uint256 price, uint256 backgroundId);
-    event GiftCardPurchased(uint256 indexed giftCardId, address indexed buyer, string message);
-    event GiftCardTransferred(uint256 indexed giftCardId, address indexed from, address indexed to);
-    event GiftCardClaimed(uint256 indexed giftCardId, address indexed recipient);
+    address public platformAddress;
+    address public climateAddress;
+    address public taxAddress;
 
-    constructor() ERC721("BackgroundNFT", "BGNFT") {}
+    // Fixed platform fee in wei (~$1.10 at ETH ~$1800)
+    uint128 public constant PLATFORM_FEE_IN_WEI = 611111111111111;
 
-    // Function to mint a background as an NFT with a category
-    function mintBackground(string memory imageURI, string memory category) external {
+    event BackgroundMinted(uint32 indexed backgroundId, address indexed artist, string imageURI, string category, uint128 price);
+    event GiftCardCreated(uint32 indexed giftCardId, address indexed creator, uint128 price, uint32 backgroundId);
+    event GiftCardTransferred(uint32 indexed giftCardId, address indexed from, address indexed to);
+    event GiftCardClaimed(uint32 indexed giftCardId, address indexed recipient);
+
+    constructor(address _platform, address _climate, address _tax) ERC721("BackgroundNFT", "BGNFT") {
+        platformAddress = _platform;
+        climateAddress = _climate;
+        taxAddress = _tax;
+    }
+
+    function mintBackground(string memory imageURI, string memory category, uint128 priceInWei) external {
         require(!mintedURIs[imageURI], "This background has already been minted");
 
         _backgroundIdCounter.increment();
-        uint256 backgroundId = _backgroundIdCounter.current();
+        uint32 backgroundId = uint32(_backgroundIdCounter.current());
 
         _safeMint(msg.sender, backgroundId);
         _setTokenURI(backgroundId, imageURI);
@@ -57,100 +64,71 @@ contract NFTGiftMarketplace is ERC721URIStorage, Ownable {
         backgrounds[backgroundId] = Background({
             artist: msg.sender,
             imageURI: imageURI,
-            category: category, // Assign the category
-            usageCount: 0
+            category: category,
+            price: priceInWei
         });
 
-        mintedURIs[imageURI] = true; // Mark this URI as minted
+        mintedURIs[imageURI] = true;
 
-        emit BackgroundMinted(backgroundId, msg.sender, imageURI, category);
+        emit BackgroundMinted(backgroundId, msg.sender, imageURI, category, priceInWei);
     }
 
-    // Function to create a gift card using a background NFT
-    function createGiftCard(
-        uint256 backgroundId,
-        uint256 price,
-        string memory message
-    ) external {
+    function createGiftCard(uint32 backgroundId, string memory message) external payable {
         require(ownerOf(backgroundId) != address(0), "Background does not exist");
 
+        uint128 backgroundPrice = backgrounds[backgroundId].price;
+
+        // Hardcoded fee percentages: tax = 4%, climate = 1%
+        uint128 taxFee = (backgroundPrice * 4) / 100;
+        uint128 climateFee = (backgroundPrice * 1) / 100;
+
+        uint128 totalRequired = backgroundPrice + PLATFORM_FEE_IN_WEI + taxFee + climateFee;
+        require(msg.value >= totalRequired, "Insufficient ETH sent");
+
+        payable(platformAddress).sendValue(PLATFORM_FEE_IN_WEI);
+        payable(taxAddress).sendValue(taxFee);
+        payable(climateAddress).sendValue(climateFee);
+        payable(backgrounds[backgroundId].artist).sendValue(backgroundPrice);
+
         _giftCardIdCounter.increment();
-        uint256 giftCardId = _giftCardIdCounter.current();
+        uint32 giftCardId = uint32(_giftCardIdCounter.current());
 
         giftCards[giftCardId] = GiftCard({
             creator: msg.sender,
             currentOwner: msg.sender,
-            price: price,
+            price: uint128(msg.value),
             message: message,
             secretHash: 0,
-            backgroundId: backgroundId,
-            isClaimable: false
+            backgroundId: backgroundId
         });
 
-        backgrounds[backgroundId].usageCount++;
-
-        emit GiftCardCreated(giftCardId, msg.sender, price, backgroundId);
+        emit GiftCardCreated(giftCardId, msg.sender, uint128(msg.value), backgroundId);
     }
 
-    // Option 1: Directly send the gift card to another user's wallet
-    function transferGiftCard(uint256 giftCardId, address recipient) external {
+    function transferGiftCard(uint32 giftCardId, address recipient) external {
         GiftCard storage giftCard = giftCards[giftCardId];
         require(giftCard.currentOwner == msg.sender, "Only the owner can transfer the gift card");
         require(recipient != address(0), "Invalid recipient address");
 
         giftCard.currentOwner = recipient;
-        giftCard.isClaimable = false; // Disable claimable mode since it's directly transferred
 
         emit GiftCardTransferred(giftCardId, msg.sender, recipient);
     }
 
-    // Option 2: Set a secret key for the gift card to make it claimable
-    function setSecretKey(uint256 giftCardId, string memory secret) external {
+    function setSecretKey(uint32 giftCardId, string memory secret) external {
         GiftCard storage giftCard = giftCards[giftCardId];
         require(giftCard.currentOwner == msg.sender, "Only the owner can set the secret key");
 
-        bytes32 secretHash = keccak256(abi.encodePacked(secret));
-        require(!hashUsed[secretHash], "Secret already used");
-
-        hashUsed[secretHash] = true;
-        giftCard.secretHash = secretHash;
-        giftCard.isClaimable = true; // Enable claimable mode
-
-        emit GiftCardTransferred(giftCardId, msg.sender, address(0)); // Indicate it's claimable
+        giftCard.secretHash = keccak256(abi.encodePacked(secret));
     }
 
-    // Function to claim a gift card using the secret key
-    function claimGiftCard(uint256 giftCardId, string memory secret) external {
+    function claimGiftCard(uint32 giftCardId, string memory secret) external {
         GiftCard storage giftCard = giftCards[giftCardId];
-        require(giftCard.isClaimable, "Gift card is not claimable");
         require(giftCard.secretHash == keccak256(abi.encodePacked(secret)), "Invalid secret");
 
         giftCard.currentOwner = msg.sender;
-        giftCard.secretHash = 0; // Prevent reuse
-        giftCard.isClaimable = false; // Disable claimable mode after claiming
 
         emit GiftCardClaimed(giftCardId, msg.sender);
-    }
-
-    // Function to buy a gift card
-    function buyGiftCard(uint256 giftCardId, string memory message) external payable {
-        GiftCard storage giftCard = giftCards[giftCardId];
-        require(msg.value == giftCard.price, "Incorrect price");
-
-        address payable seller = payable(giftCard.currentOwner);
-        uint256 backgroundId = giftCard.backgroundId;
-        address payable artist = payable(ownerOf(backgroundId));
-
-        uint256 artistShare = (msg.value * 40) / 100;
-        uint256 sellerShare = msg.value - artistShare;
-
-        artist.sendValue(artistShare);
-        seller.sendValue(sellerShare);
-
-        giftCard.currentOwner = msg.sender;
-        giftCard.message = message;
-
-        emit GiftCardPurchased(giftCardId, msg.sender, message);
     }
 
     function _burn(uint256 tokenId) internal override(ERC721URIStorage) {

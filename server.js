@@ -529,242 +529,98 @@ const ARTIST_MESSAGE =
 // Direct background creation endpoint
 app.post("/api/backgrounds", upload.single("image"), async (req, res) => {
   try {
-    console.log("Background creation request received:", req.body);
-    console.log("File:", req.file);
-    console.log("Headers:", req.headers);
+    const { category, price } = req.body;
+    const imageFile = req.file;
 
-    const { category, price, artistAddress } = req.body;
-    const imageURI = req.file ? `/uploads/${req.file.filename}` : null;
-
-    console.log("Received artist address:", artistAddress);
-    console.log("Received artist address type:", typeof artistAddress);
-
-    if (!imageURI) {
+    if (!imageFile) {
       return res.status(400).json({ error: "Image file is required" });
     }
-
     if (!category || !price) {
       return res.status(400).json({ error: "Category and price are required" });
     }
-
-    if (!artistAddress) {
-      return res.status(400).json({ error: "Artist address is required" });
+    if (isNaN(price) || Number(price) <= 0) {
+      return res.status(400).json({ error: "Price must be a positive number" });
     }
 
-    try {
-      // First create a database record
-      console.log("Attempting to create background with:", {
-        artistAddress: artistAddress,
-        imageURI,
-        category,
-        price,
-        usageCount: 0,
-      });
+    // Construct image URL (adjust as per your storage setup)
+    const imageUrl = `https://${process.env.S3_BUCKET_NAME}.s3.us-west-2.amazonaws.com/${imageFile.filename}`;
 
-      // Create a local record first
-      const localBackground = await Background.create({
-        artistAddress: artistAddress,
-        imageURI,
-        category,
-        price,
-        usageCount: 0,
-      });
+    // Create DB record first
+    const localBackground = await Background.create({
+      artistAddress: req.body.artistAddress || null,
+      imageURI: imageUrl,
+      category,
+      price,
+      usageCount: 0
+    });
 
-      console.log("Background created in database:", localBackground);
+    // Mint on blockchain with new contract logic
+    const tx = await contract.mintBackground(
+      imageUrl,
+      category,
+      ethers.parseEther(price.toString())
+    );
+    const receipt = await tx.wait();
 
-      // Now mint the NFT on the blockchain
-      console.log("🔹 Minting Background on Blockchain:", {
-        imageURI,
-        category,
-      });
+    // Extract backgroundId from event logs (as before)
+    const event = receipt.logs.find((log) => {
       try {
-        // Create full URI for the image
-        const fullImageURI = `${
-          process.env.NODE_ENV === "production"
-            ? "https://yourdomain.com"
-            : "http://localhost:3001/"
-        }${imageURI}`;
-
-        // For debugging
-        console.log(`Server wallet address: ${wallet.address}`);
-        console.log(`Artist address: ${artistAddress}`);
-        console.log(`Minting with image URI: ${fullImageURI}`);
-        console.log(`Category: ${category}`);
-
-        // Important fix: Store the artistAddress in the database record properly
-        // Make sure this is set before the blockchain transaction is attempted
-        await localBackground.update({
-          artistAddress: artistAddress,
-        });
-
-        // The server wallet will mint the background NFT on behalf of the user
-        // But we'll credit the artist correctly in our database
-        const tx = await contract.mintBackground(fullImageURI, category);
-
-        console.log("Transaction hash:", tx.hash);
-        console.log(
-          "Transaction sent to blockchain - Etherscan URL:",
-          `https://sepolia.etherscan.io/tx/${tx.hash}`
-        );
-
-        // Update the database with the transaction hash even before it's mined
-        await localBackground.update({
-          blockchainTxHash: tx.hash,
-        });
-
-        // Wait for the transaction to be mined
-        console.log("Waiting for transaction to be mined...");
-        try {
-          const receipt = await tx.wait();
-          console.log("🔍 Transaction mined! Receipt:", receipt);
-
-          // Extract the backgroundId from the event
-          const event = receipt.logs.find((log) => {
-            try {
-              return log.fragment && log.fragment.name === "BackgroundMinted";
-            } catch (err) {
-              console.log("Error checking log fragment:", err);
-              return false;
-            }
-          });
-
-          if (event) {
-            const backgroundId = event.args.backgroundId.toString();
-            console.log(
-              `✅ Background Minted on Blockchain - ID: ${backgroundId}`
-            );
-            console.log(
-              `View on Etherscan: https://sepolia.etherscan.io/token/${contractAddress}?a=${backgroundId}`
-            );
-
-            // Update our local record with the blockchain ID
-            await localBackground.update({
-              blockchainId: backgroundId,
-            });
-
-            // Send successful response with transaction info
-            res.status(201).json({
-              success: true,
-              background: {
-                id: localBackground.id,
-                artistAddress: localBackground.artistAddress,
-                imageURI: localBackground.imageURI,
-                category: localBackground.category,
-                price: localBackground.price,
-                blockchainTxHash: localBackground.blockchainTxHash,
-                blockchainId: localBackground.blockchainId,
-                transactionHash: localBackground.blockchainTxHash,
-                etherscanUrl: localBackground.blockchainTxHash
-                  ? `https://sepolia.etherscan.io/tx/${localBackground.blockchainTxHash}`
-                  : null,
-                message: ARTIST_MESSAGE,
-              },
-            });
-          } else {
-            console.warn(
-              "BackgroundMinted event not found in transaction receipt"
-            );
-            console.log("All logs:", receipt.logs);
-            // Continue with successful response but flag no event found
-            res.status(201).json({
-              success: true,
-              warning:
-                "Transaction completed but no BackgroundMinted event found",
-              background: {
-                id: localBackground.id,
-                artistAddress: localBackground.artistAddress,
-                imageURI: localBackground.imageURI,
-                category: localBackground.category,
-                price: localBackground.price,
-                blockchainTxHash: localBackground.blockchainTxHash,
-                blockchainId: localBackground.blockchainId,
-                transactionHash: localBackground.blockchainTxHash,
-                etherscanUrl: localBackground.blockchainTxHash
-                  ? `https://sepolia.etherscan.io/tx/${localBackground.blockchainTxHash}`
-                  : null,
-                message: ARTIST_MESSAGE,
-              },
-            });
-          }
-        } catch (miningError) {
-          console.error(
-            "Error waiting for transaction to be mined:",
-            miningError
-          );
-          // Transaction was sent but failed to mine or get receipt
-          res.status(201).json({
-            success: true,
-            warning: "Transaction sent but failed to get confirmation",
-            error: miningError.message,
-            background: {
-              id: localBackground.id,
-              artistAddress: localBackground.artistAddress,
-              imageURI: localBackground.imageURI,
-              category: localBackground.category,
-              price: localBackground.price,
-              blockchainTxHash: localBackground.blockchainTxHash,
-              blockchainId: localBackground.blockchainId,
-              transactionHash: localBackground.blockchainTxHash,
-              etherscanUrl: localBackground.blockchainTxHash
-                ? `https://sepolia.etherscan.io/tx/${localBackground.blockchainTxHash}`
-                : null,
-              message: ARTIST_MESSAGE,
-            },
-          });
-        }
-      } catch (blockchainError) {
-        console.error("Error minting on blockchain:", blockchainError);
-        // If blockchain mint fails, we still return success for the database record
-        // but include a warning
-        res.status(201).json({
-          success: true,
-          warning: "Database record created but blockchain minting failed",
-          error: blockchainError.message,
-          background: {
-            id: localBackground.id,
-            artistAddress: localBackground.artistAddress,
-            imageURI: localBackground.imageURI,
-            category: localBackground.category,
-            price: localBackground.price,
-            blockchainTxHash: localBackground.blockchainTxHash,
-            blockchainId: localBackground.blockchainId,
-            transactionHash: localBackground.blockchainTxHash,
-            etherscanUrl: localBackground.blockchainTxHash
-              ? `https://sepolia.etherscan.io/tx/${localBackground.blockchainTxHash}`
-              : null,
-            message: ARTIST_MESSAGE,
-          },
-        });
+        return log.fragment && log.fragment.name === "BackgroundMinted";
+      } catch (err) {
+        console.log("Error checking log fragment:", err);
+        return false;
       }
-    } catch (dbError) {
-      console.error("Database error creating background:", dbError);
-      res.status(500).json({
-        success: false,
-        error: `Database error: ${dbError.message}`,
+    });
+
+    if (event) {
+      const backgroundId = event.args.backgroundId.toString();
+      await localBackground.update({
+        blockchainId: backgroundId,
+        blockchainTxHash: tx.hash
       });
+    } else {
+      console.warn("BackgroundMinted event not found in transaction receipt");
     }
+
+    res.status(201).json({
+      success: true,
+      background: {
+        id: localBackground.id,
+        artistAddress: localBackground.artistAddress,
+        imageURI: localBackground.imageURI,
+        category: localBackground.category,
+        price: localBackground.price,
+        blockchainTxHash: localBackground.blockchainTxHash,
+        blockchainId: localBackground.blockchainId,
+        transactionHash: localBackground.blockchainTxHash,
+        etherscanUrl: localBackground.blockchainTxHash
+          ? `https://sepolia.etherscan.io/tx/${localBackground.blockchainTxHash}`
+          : null,
+      },
+    });
   } catch (error) {
     console.error("Error creating background:", error);
-    res.status(500).json({
-      success: false,
-      error: error.message || "Failed to create background",
-    });
+    res.status(500).json({ error: "Failed to create background" });
   }
 });
 
 // Mint Background
 app.post("/api/background/mint", async (req, res) => {
   try {
-    const { imageURI, category } = req.body;
-    if (!imageURI || !category) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing required fields: imageURI and category are required.",
-      });
+    const { imageURI, category, price } = req.body;
+    if (!imageURI || !category || !price) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+    if (isNaN(price) || Number(price) <= 0) {
+      return res.status(400).json({ error: "Invalid price" });
     }
 
-    console.log("🔹 Minting Background:", { imageURI, category });
-    const tx = await contract.mintBackground(imageURI, category);
+    console.log("🔹 Minting Background:", { imageURI, category, price });
+    const tx = await contract.mintBackground(
+      imageURI,
+      category,
+      ethers.parseEther(price.toString())
+    );
     const receipt = await tx.wait();
     console.log("🔍 Transaction Receipt:", receipt);
 
@@ -785,6 +641,7 @@ app.post("/api/background/mint", async (req, res) => {
       artistAddress: wallet.address,
       imageURI,
       category,
+      price,
     });
 
     console.log(`✅ Background Minted and Saved to DB - ID: ${backgroundId}`);
@@ -892,10 +749,17 @@ app.post(
           message,
         });
         try {
+          // Calculate total required ETH as per contract logic
+          const backgroundPrice = ethers.parseEther(price.toString());
+          const PLATFORM_FEE_IN_WEI = ethers.BigInt("611111111111111");
+          const taxFee = backgroundPrice * 4n / 100n;
+          const climateFee = backgroundPrice / 100n;
+          const totalRequired = backgroundPrice + PLATFORM_FEE_IN_WEI + taxFee + climateFee;
+
           const tx = await contract.createGiftCard(
             backgroundId,
-            ethers.parseEther(price),
-            message
+            message,
+            { value: totalRequired }
           );
           const receipt = await tx.wait();
           console.log("🔍 Transaction Receipt:", receipt);

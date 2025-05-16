@@ -58,10 +58,10 @@ const validateGiftCardInput = (req, res, next) => {
 router.post('/create', verifyToken, createLimiter, validateGiftCardInput, async (req, res) => {
   const { backgroundId, price, message } = req.body;
   const sequelize = GiftCard.sequelize;
-  
+
   // Start a transaction
   const transaction = await sequelize.transaction();
-  
+
   try {
     console.log('Creating gift card with data:', {
       backgroundId,
@@ -69,38 +69,45 @@ router.post('/create', verifyToken, createLimiter, validateGiftCardInput, async 
       message,
       userWalletAddress: req.user.walletAddress
     });
-    
+
     if (!req.user.walletAddress) {
       throw new Error('User wallet address is required but not found in token');
     }
-    
+
     // Check if background exists - within transaction
     const background = await Background.findByPk(backgroundId, { transaction });
     if (!background) {
       await transaction.rollback();
       console.error(`Background not found with ID: ${backgroundId}`);
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        error: 'Background not found' 
+        error: 'Background not found'
       });
     }
-    
+
     console.log('Found background:', background.id);
-    
+
     let transactionHash = null;
     let blockchainError = null;
-    
+
     // Handle blockchain transaction if enabled
     if (BLOCKCHAIN_ENABLED && req.app.contract) {
       try {
         console.log('Creating gift card on blockchain...');
+        // Calculate total required ETH as per contract
+        const backgroundPrice = ethers.parseEther(background.price.toString());
+        const PLATFORM_FEE_IN_WEI = ethers.BigInt("611111111111111");
+        const taxFee = backgroundPrice * 4n / 100n;
+        const climateFee = backgroundPrice / 100n;
+        const totalRequired = backgroundPrice + PLATFORM_FEE_IN_WEI + taxFee + climateFee;
+
         const tx = await req.app.contract.createGiftCard(
           backgroundId,
-          ethers.parseEther(price.toString()),
-          message || ''
+          message || '',
+          { value: totalRequired }
         );
         const receipt = await tx.wait();
-        transactionHash = receipt.transactionHash;
+        transactionHash = receipt.transactionHash || tx.hash;
         console.log('Blockchain transaction successful:', transactionHash);
       } catch (error) {
         console.error('Blockchain error:', error);
@@ -110,16 +117,16 @@ router.post('/create', verifyToken, createLimiter, validateGiftCardInput, async 
     } else {
       console.log('Blockchain functionality is disabled or not available');
     }
-    
+
     console.log('Creating gift card in database...');
-    
+
     // Get the next available ID
     const lastGiftCard = await GiftCard.findOne({
       order: [['id', 'DESC']],
       transaction
     });
     const nextId = lastGiftCard ? parseInt(lastGiftCard.id) + 1 : 1;
-    
+
     // Create gift card with proper error handling - within transaction
     const giftCard = await GiftCard.create({
       id: nextId,
@@ -131,12 +138,12 @@ router.post('/create', verifyToken, createLimiter, validateGiftCardInput, async 
       transactionHash,
       isClaimable: false
     }, { transaction });
-    
+
     // If we get here, commit the transaction
     await transaction.commit();
-    
+
     console.log('Gift card created successfully:', giftCard.id);
-    
+
     // If there was a blockchain error but database succeeded, include warning
     if (blockchainError) {
       return res.status(201).json({
@@ -145,7 +152,7 @@ router.post('/create', verifyToken, createLimiter, validateGiftCardInput, async 
         warning: 'Gift card created in database but blockchain operation failed'
       });
     }
-    
+
     res.status(201).json({
       success: true,
       data: giftCard.toJSON()
@@ -153,10 +160,10 @@ router.post('/create', verifyToken, createLimiter, validateGiftCardInput, async 
   } catch (error) {
     // Rollback transaction on error
     await transaction.rollback();
-    
+
     console.error('Create gift card error:', error);
     console.error('Error stack:', error.stack);
-    
+
     // Handle specific error cases
     if (error.message.includes('wallet address is required')) {
       return res.status(401).json({
@@ -165,8 +172,8 @@ router.post('/create', verifyToken, createLimiter, validateGiftCardInput, async 
         details: 'User wallet address is required. Please reconnect your wallet.'
       });
     }
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       success: false,
       error: 'Failed to create gift card',
       details: process.env.NODE_ENV === 'development' ? {
@@ -233,8 +240,9 @@ router.post('/transfer', verifyToken, validateGiftCardInput, async (req, res) =>
     // Handle blockchain transaction if enabled
     if (BLOCKCHAIN_ENABLED) {
       try {
-        // Your blockchain transaction code here
-        transactionHash = 'dummy_hash'; // Replace with actual transaction
+        const tx = await req.app.contract.transferGiftCard(giftCardId, recipientAddress);
+        const receipt = await tx.wait();
+        transactionHash = receipt.transactionHash || tx.hash;
       } catch (blockchainError) {
         console.error('Blockchain error:', blockchainError);
         return res.status(500).json({ 

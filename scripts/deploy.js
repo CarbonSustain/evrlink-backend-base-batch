@@ -13,17 +13,33 @@ async function main() {
   console.log("💰 Account balance:", hre.ethers.formatEther(balance), "ETH");
 
   // Check if the deployer has enough balance
-  if (hre.ethers.formatEther(balance) < 0.01) {
+  if (parseFloat(hre.ethers.formatEther(balance)) < 0.01) {
     console.error("❌ Insufficient balance to deploy the contract.");
     process.exit(1);
   }
 
-  // Deploy the contract
+  // Read constructor arguments from environment variables
+  const platformAddress = process.env.PLATFORM_ADDRESS;
+  const climateAddress = process.env.CLIMATE_ADDRESS;
+  const taxAddress = process.env.TAX_ADDRESS;
+
+  if (!platformAddress || !climateAddress || !taxAddress) {
+    console.error(
+      "❌ PLATFORM_ADDRESS, CLIMATE_ADDRESS, or TAX_ADDRESS not set in .env"
+    );
+    process.exit(1);
+  }
+
+  // Deploy the contract with constructor arguments
   console.log("📦 Deploying the NFTGiftMarketplace contract...");
   const NFTGiftMarketplace = await hre.ethers.getContractFactory(
     "NFTGiftMarketplace"
   );
-  const nftGiftMarketplace = await NFTGiftMarketplace.deploy();
+  const nftGiftMarketplace = await NFTGiftMarketplace.deploy(
+    platformAddress,
+    climateAddress,
+    taxAddress
+  );
   await nftGiftMarketplace.waitForDeployment();
 
   // Get the deployed contract address
@@ -44,7 +60,7 @@ async function main() {
     try {
       await hre.run("verify:verify", {
         address: address,
-        constructorArguments: [],
+        constructorArguments: [platformAddress, climateAddress, taxAddress],
       });
       console.log("✅ Contract verified on Etherscan!");
     } catch (error) {

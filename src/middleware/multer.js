@@ -21,10 +21,11 @@ const upload = multer({
     },
     key: (req, file, cb) => {
       // Get file extension from mimetype
-      const ext = file.mimetype.split('/')[1];
+      const ext = file.mimetype.split("/")[1];
       // For jpeg mimetype, use .jpeg extension
-      const finalExt = ext === 'jpeg' ? 'jpeg' : ext;
+      const finalExt = ext === "jpeg" ? "jpeg" : ext;
       const fileName = `${Date.now()}.${finalExt}`;
+      req.fileName = fileName;
       cb(null, fileName);
     },
   }),
