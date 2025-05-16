@@ -6,9 +6,6 @@ const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = process.env;
 const { verifyToken } = require('../middleware/auth');
 
-// Create Email-Wallet model for mapping emails to wallets
-const EmailWallet = require('../models/EmailWallet');
-
 // Login with wallet - using the most resilient approach possible
 router.post('/login', async (req, res) => {
   try {
