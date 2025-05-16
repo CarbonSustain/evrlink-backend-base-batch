@@ -14,68 +14,63 @@ const {
   pythActionProvider,
   SmartWalletProvider,
   walletActionProvider,
+  WalletProvider,
   wethActionProvider,
 } = require("@coinbase/agentkit");
-const fs = require("fs");
-const { generatePrivateKey, privateKeyToAccount } = require("viem/accounts");
-
-// Configure a file to persist the agent's Smart Wallet + Private Key data
-const WALLET_DATA_FILE = "wallet_data.txt";
+const { privateKeyToAccount } = require("viem/accounts");
 
 /**
  * Prepares the AgentKit and WalletProvider.
  *
  * @function prepareAgentkitAndWalletProvider
+ * @param {string} [userId="default"] - The user ID for the wallet data
  * @returns {Promise<{ agentkit: AgentKit, walletProvider: WalletProvider }>} The initialized AI agent.
  *
  * @description Handles agent setup
  *
  * @throws {Error} If the agent initialization fails.
  */
-async function prepareAgentkitAndWalletProvider() {
+async function prepareAgentkitAndWalletProvider(userId = "default") {
   try {
-    let walletData = null;
-    let privateKey = null;
+    // Use the specified wallet address and private key
+    const walletAddress = process.env.WALLET_ADDRESS;
+    const privateKey = process.env.PRIVATE_KEY_AGENT;
 
-    // Read existing wallet data if available
-    if (fs.existsSync(WALLET_DATA_FILE)) {
-      try {
-        walletData = JSON.parse(fs.readFileSync(WALLET_DATA_FILE, "utf8"));
-        privateKey = walletData.privateKey;
-      } catch (error) {
-        console.error("Error reading wallet data:", error);
-        // Continue without wallet data
-      }
+    if (!privateKey || !walletAddress) {
+      throw new Error('WALLET_ADDRESS and PRIVATE_KEY_AGENT must be set in environment variables');
     }
 
-    if (!privateKey) {
-      if (walletData?.smartWalletAddress) {
-        throw new Error(
-          `Smart wallet found but no private key provided. Either provide the private key, or delete ${WALLET_DATA_FILE} and try again.`,
-        );
-      }
-      privateKey = process.env.PRIVATE_KEY || generatePrivateKey();
-    }
+    // Add 0x prefix if not present
+    const formattedPrivateKey = privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`;
+    console.log('Using wallet:', { address: walletAddress });
 
-    const signer = privateKeyToAccount(privateKey);
+    // Create the signer from the private key
+    const signer = privateKeyToAccount(formattedPrivateKey);
 
-    // Initialize WalletProvider
-    const walletProvider = await SmartWalletProvider.configureWithWallet({
+    // Initialize a basic WalletProvider with the signer
+    const walletProvider = new WalletProvider({
       networkId: process.env.NETWORK_ID || "base-sepolia",
-      signer,
-      smartWalletAddress: walletData?.smartWalletAddress,
-      paymasterUrl: undefined, // Sponsor transactions
+      signer
     });
 
-    // Initialize AgentKit
+    // Initialize AgentKit with action providers
     const erc721 = erc721ActionProvider();
     const pyth = pythActionProvider();
-    const wallet = walletActionProvider(); // default action package: get balance, native transfer, and get wallet details
+    const wallet = walletActionProvider();
+    
+    // Check if CDP API keys are available
+    const cdpApiKeyName = process.env.CDP_API_KEY_NAME || "";
+    const cdpApiKeyPrivateKey = process.env.CDP_API_KEY_PRIVATE_KEY?.replace(/\n/g, "\n") || "";
+    
+    // Initialize CDP providers with fallbacks for missing environment variables
     const cdp = cdpApiActionProvider({
-      apiKeyName: process.env.CDP_API_KEY_NAME,
-      apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+      apiKeyName: cdpApiKeyName,
+      apiKeyPrivateKey: cdpApiKeyPrivateKey,
     });
-    const cdpWallet = cdpWalletActionProvider();
+    const cdpWallet = cdpWalletActionProvider({
+      apiKeyName: cdpApiKeyName,
+      apiKeyPrivateKey: cdpApiKeyPrivateKey,
+    });
     const weth = wethActionProvider();
     const erc20 = erc20ActionProvider();
     
@@ -84,15 +79,8 @@ async function prepareAgentkitAndWalletProvider() {
       actionProviders: [erc721, pyth, wallet, cdp, cdpWallet, weth, erc20],
     });
 
-    // Save wallet data
     const smartWalletAddress = await walletProvider.getAddress();
-    fs.writeFileSync(
-      WALLET_DATA_FILE,
-      JSON.stringify({
-        privateKey,
-        smartWalletAddress,
-      }),
-    );
+    console.log('Smart wallet configured:', { address: smartWalletAddress });
 
     return { agentkit, walletProvider };
   } catch (error) {

@@ -10,8 +10,15 @@ const path = require('path');
 // Import the onchain agent implementation
 let createOnchainAgent;
 try {
-  createOnchainAgent = require('./onchain-agent/create-agent').createOnchainAgent;
-  console.log('Onchain agent module loaded successfully');
+  // Try to load the compiled JS version from the dist directory first
+  try {
+    createOnchainAgent = require('../../dist/services/onchain-agent/create-agent').createAgent;
+    console.log('Onchain agent module loaded successfully from dist directory');
+  } catch (distError) {
+    // If the dist version fails, try to load from the original directory
+    createOnchainAgent = require('./onchain-agent/create-agent').createAgent;
+    console.log('Onchain agent module loaded successfully from source directory');
+  }
 } catch (error) {
   console.warn('Onchain agent module not available:', error.message);
   createOnchainAgent = null;
@@ -80,7 +87,7 @@ class MockAgent {
     
     // Generate a response based on the input
     const userMessage = input.messages[0].content;
-    const response = this.generateResponse(userMessage);
+    const response = this._generateResponse(userMessage);
     
     // Yield the response in the expected format
     yield {
@@ -93,9 +100,16 @@ class MockAgent {
   }
 
   /**
-   * Generates a response based on the user's message
+   * Non-streaming response for compatibility
    */
-  generateResponse(message) {
+  async generateResponse(message) {
+    return this._generateResponse(message);
+  }
+
+  /**
+   * Internal method to generate a response based on the user's message
+   */
+  _generateResponse(message) {
     const lowerMessage = message.toLowerCase();
     
     // Simple pattern matching for common questions

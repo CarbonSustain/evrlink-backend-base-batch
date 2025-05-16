@@ -26,18 +26,7 @@ const app = express();
 app.use(
   helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        imgSrc: [
-          "'self'",
-          "data:",
-          "https://api.evrlink.com",
-          "https://evrlink.com",
-          "*",
-        ],
-      },
-    },
+    contentSecurityPolicy: false
   })
 );
 app.use(compression());
@@ -51,23 +40,17 @@ const limiter = rateLimit({
 
 app.use(limiter);
 
-// CORS configuration for production
-const corsOptions = {
-  origin: [
-    "https://evrlink.com",
-    "https://www.evrlink.com",
-    "https://evrlink.io",
-    "https://www.evrlink.io", // Allow requests from this domain
-    "http://localhost:8001",
-    "http://127.0.0.1:8080",
-  ],
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-  exposedHeaders: ["Cross-Origin-Resource-Policy"],
-  credentials: true,
-};
+// CORS configuration
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+  credentials: true
+}));
 
-app.use(cors(corsOptions));
+// Pre-flight requests
+app.options('*', cors());
+
 app.use(express.json());
 
 // Serve uploaded files statically with CORS headers
@@ -129,12 +112,66 @@ app.use("/uploads/*", (req, res) => {
   res.status(404).send("Image not found (fallback)");
 });
 
+// Agent endpoint
+app.post('/api/agent', async (req, res) => {
+  try {
+    const { message: userMessage, userId = 'default' } = req.body;
+    
+    if (!userMessage) {
+      return res.status(400).json({ error: 'No message found in request' });
+    }
+
+    console.log('Processing agent request:', { userMessage, userId });
+
+    // Get the agent instance
+    const agent = await createAgent(userId);
+    
+    try {
+      // Stream the agent's response using the stream method
+      console.log(`Streaming response for message: "${userMessage}"`);
+      const stream = await agent.stream(
+        { messages: [{ content: userMessage, role: "user" }] },
+        { configurable: { thread_id: `Evrlink-${userId}` } },
+      );
+
+      // Process the streamed response chunks into a single message
+      let response = "";
+      console.log("Processing response stream...");
+      for await (const chunk of stream) {
+        if ("agent" in chunk) {
+          response += chunk.agent.messages[0].content;
+        }
+      }
+
+      console.log('Agent response:', response);
+      
+      if (!response) {
+        console.error('No valid response from agent');
+        return res.status(500).json({ error: 'No valid response from agent' });
+      }
+
+      console.log('Sending response:', response);
+      return res.json({ response });
+    } catch (agentError) {
+      console.error('Error calling agent:', agentError);
+      throw agentError;
+    }
+  } catch (error) {
+    console.error('Error in agent endpoint:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
 // Mount API routes
 app.use("/api", apiRoutes);
-// Initialize blockchain connection
+
+// Initialize blockchain and agent
 let contract = null;
 let wallet = null;
 let blockchainEnabled = false;
+
+// Import agent service
+const { createAgent } = require('./src/services/agent.service');
 
 try {
   // Check if required environment variables are set
@@ -214,10 +251,19 @@ try {
   console.warn("Blockchain features will be disabled");
 }
 
-// Add contract, wallet and blockchain status to app
+// Add contract, wallet, blockchain status, and agent to app
 app.contract = contract;
 app.wallet = wallet;
 app.blockchainEnabled = blockchainEnabled;
+
+// Initialize agent
+let agent = null;
+createAgent().then(a => {
+  agent = a;
+  console.log('Agent initialized successfully');
+}).catch(error => {
+  console.error('Failed to initialize agent:', error);
+});
 
 // Add updateUserStats to app if available
 if (typeof updateUserStats === "function") {
@@ -319,98 +365,242 @@ const ARTIST_MESSAGE =
 // Direct background creation endpoint
 app.post("/api/backgrounds", upload.single("image"), async (req, res) => {
   try {
-    const { category, price } = req.body;
-    const imageFile = req.file;
+    console.log("Background creation request received:", req.body);
+    console.log("File:", req.file);
+    console.log("Headers:", req.headers);
 
-    if (!imageFile) {
+    const { category, price, artistAddress } = req.body;
+    const imageURI = req.file ? `/uploads/${req.file.filename}` : null;
+
+    console.log("Received artist address:", artistAddress);
+    console.log("Received artist address type:", typeof artistAddress);
+
+    if (!imageURI) {
       return res.status(400).json({ error: "Image file is required" });
     }
+
     if (!category || !price) {
       return res.status(400).json({ error: "Category and price are required" });
     }
-    if (isNaN(price) || Number(price) <= 0) {
-      return res.status(400).json({ error: "Price must be a positive number" });
+
+    if (!artistAddress) {
+      return res.status(400).json({ error: "Artist address is required" });
     }
 
-    // Construct image URL (adjust as per your storage setup)
-    const imageUrl = `https://${process.env.S3_BUCKET_NAME}.s3.us-west-2.amazonaws.com/${req.fileName}`;
-
-    // Create DB record first
-    const localBackground = await Background.create({
-      artistAddress: req.body.artistAddress || null,
-      imageURI: imageUrl,
-      category,
-      price,
-      usageCount: 0,
-    });
-
-    // Mint on blockchain with new contract logic
-    const tx = await contract.mintBackground(
-      imageUrl,
-      category,
-      ethers.parseEther(price.toString())
-    );
-    const receipt = await tx.wait();
-
-    // Extract backgroundId from event logs (as before)
-    const event = receipt.logs.find((log) => {
-      try {
-        return log.fragment && log.fragment.name === "BackgroundMinted";
-      } catch (err) {
-        console.log("Error checking log fragment:", err);
-        return false;
-      }
-    });
-
-    if (event) {
-      const backgroundId = event.args.backgroundId.toString();
-      await localBackground.update({
-        blockchainId: backgroundId,
-        blockchainTxHash: tx.hash,
+    try {
+      // First create a database record
+      console.log("Attempting to create background with:", {
+        artistAddress: artistAddress,
+        imageURI,
+        category,
+        price,
+        usageCount: 0,
       });
-    } else {
-      console.warn("BackgroundMinted event not found in transaction receipt");
-    }
 
-    res.status(201).json({
-      success: true,
-      background: {
-        id: localBackground.id,
-        artistAddress: localBackground.artistAddress,
-        imageURI: localBackground.imageURI,
-        category: localBackground.category,
-        price: localBackground.price,
-        blockchainTxHash: localBackground.blockchainTxHash,
-        blockchainId: localBackground.blockchainId,
-        transactionHash: localBackground.blockchainTxHash,
-        etherscanUrl: localBackground.blockchainTxHash
-          ? `https://sepolia.etherscan.io/tx/${localBackground.blockchainTxHash}`
-          : null,
-      },
-    });
+      // Create a local record first
+      const localBackground = await Background.create({
+        artistAddress: artistAddress,
+        imageURI,
+        category,
+        price,
+        usageCount: 0,
+      });
+
+      console.log("Background created in database:", localBackground);
+
+      // Now mint the NFT on the blockchain
+      console.log("🔹 Minting Background on Blockchain:", {
+        imageURI,
+        category,
+      });
+      try {
+        // Create full URI for the image
+        const fullImageURI = `${
+          process.env.NODE_ENV === "production"
+            ? "https://yourdomain.com"
+            : "http://localhost:3001/"
+        }${imageURI}`;
+
+        // For debugging
+        console.log(`Server wallet address: ${wallet.address}`);
+        console.log(`Artist address: ${artistAddress}`);
+        console.log(`Minting with image URI: ${fullImageURI}`);
+        console.log(`Category: ${category}`);
+
+        // Important fix: Store the artistAddress in the database record properly
+        // Make sure this is set before the blockchain transaction is attempted
+        await localBackground.update({
+          artistAddress: artistAddress,
+        });
+
+        // The server wallet will mint the background NFT on behalf of the user
+        // But we'll credit the artist correctly in our database
+        const tx = await contract.mintBackground(fullImageURI, category);
+
+        console.log("Transaction hash:", tx.hash);
+        console.log(
+          "Transaction sent to blockchain - Etherscan URL:",
+          `https://sepolia.etherscan.io/tx/${tx.hash}`
+        );
+
+        // Update the database with the transaction hash even before it's mined
+        await localBackground.update({
+          blockchainTxHash: tx.hash,
+        });
+
+        // Wait for the transaction to be mined
+        console.log("Waiting for transaction to be mined...");
+        try {
+          const receipt = await tx.wait();
+          console.log("🔍 Transaction mined! Receipt:", receipt);
+
+          // Extract the backgroundId from the event
+          const event = receipt.logs.find((log) => {
+            try {
+              return log.fragment && log.fragment.name === "BackgroundMinted";
+            } catch (err) {
+              console.log("Error checking log fragment:", err);
+              return false;
+            }
+          });
+
+          if (event) {
+            const backgroundId = event.args.backgroundId.toString();
+            console.log(
+              `✅ Background Minted on Blockchain - ID: ${backgroundId}`
+            );
+            console.log(
+              `View on Etherscan: https://sepolia.etherscan.io/token/${contractAddress}?a=${backgroundId}`
+            );
+
+            // Update our local record with the blockchain ID
+            await localBackground.update({
+              blockchainId: backgroundId,
+            });
+
+            // Send successful response with transaction info
+            res.status(201).json({
+              success: true,
+              background: {
+                id: localBackground.id,
+                artistAddress: localBackground.artistAddress,
+                imageURI: localBackground.imageURI,
+                category: localBackground.category,
+                price: localBackground.price,
+                blockchainTxHash: localBackground.blockchainTxHash,
+                blockchainId: localBackground.blockchainId,
+                transactionHash: localBackground.blockchainTxHash,
+                etherscanUrl: localBackground.blockchainTxHash
+                  ? `https://sepolia.etherscan.io/tx/${localBackground.blockchainTxHash}`
+                  : null,
+                message: ARTIST_MESSAGE,
+              },
+            });
+          } else {
+            console.warn(
+              "BackgroundMinted event not found in transaction receipt"
+            );
+            console.log("All logs:", receipt.logs);
+            // Continue with successful response but flag no event found
+            res.status(201).json({
+              success: true,
+              warning:
+                "Transaction completed but no BackgroundMinted event found",
+              background: {
+                id: localBackground.id,
+                artistAddress: localBackground.artistAddress,
+                imageURI: localBackground.imageURI,
+                category: localBackground.category,
+                price: localBackground.price,
+                blockchainTxHash: localBackground.blockchainTxHash,
+                blockchainId: localBackground.blockchainId,
+                transactionHash: localBackground.blockchainTxHash,
+                etherscanUrl: localBackground.blockchainTxHash
+                  ? `https://sepolia.etherscan.io/tx/${localBackground.blockchainTxHash}`
+                  : null,
+                message: ARTIST_MESSAGE,
+              },
+            });
+          }
+        } catch (miningError) {
+          console.error(
+            "Error waiting for transaction to be mined:",
+            miningError
+          );
+          // Transaction was sent but failed to mine or get receipt
+          res.status(201).json({
+            success: true,
+            warning: "Transaction sent but failed to get confirmation",
+            error: miningError.message,
+            background: {
+              id: localBackground.id,
+              artistAddress: localBackground.artistAddress,
+              imageURI: localBackground.imageURI,
+              category: localBackground.category,
+              price: localBackground.price,
+              blockchainTxHash: localBackground.blockchainTxHash,
+              blockchainId: localBackground.blockchainId,
+              transactionHash: localBackground.blockchainTxHash,
+              etherscanUrl: localBackground.blockchainTxHash
+                ? `https://sepolia.etherscan.io/tx/${localBackground.blockchainTxHash}`
+                : null,
+              message: ARTIST_MESSAGE,
+            },
+          });
+        }
+      } catch (blockchainError) {
+        console.error("Error minting on blockchain:", blockchainError);
+        // If blockchain mint fails, we still return success for the database record
+        // but include a warning
+        res.status(201).json({
+          success: true,
+          warning: "Database record created but blockchain minting failed",
+          error: blockchainError.message,
+          background: {
+            id: localBackground.id,
+            artistAddress: localBackground.artistAddress,
+            imageURI: localBackground.imageURI,
+            category: localBackground.category,
+            price: localBackground.price,
+            blockchainTxHash: localBackground.blockchainTxHash,
+            blockchainId: localBackground.blockchainId,
+            transactionHash: localBackground.blockchainTxHash,
+            etherscanUrl: localBackground.blockchainTxHash
+              ? `https://sepolia.etherscan.io/tx/${localBackground.blockchainTxHash}`
+              : null,
+            message: ARTIST_MESSAGE,
+          },
+        });
+      }
+    } catch (dbError) {
+      console.error("Database error creating background:", dbError);
+      res.status(500).json({
+        success: false,
+        error: `Database error: ${dbError.message}`,
+      });
+    }
   } catch (error) {
     console.error("Error creating background:", error);
-    res.status(500).json({ error: "Failed to create background" });
+    res.status(500).json({
+      success: false,
+      error: error.message || "Failed to create background",
+    });
   }
 });
 
 // Mint Background
 app.post("/api/background/mint", async (req, res) => {
   try {
-    const { imageURI, category, price } = req.body;
-    if (!imageURI || !category || !price) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
-    if (isNaN(price) || Number(price) <= 0) {
-      return res.status(400).json({ error: "Invalid price" });
+    const { imageURI, category } = req.body;
+    if (!imageURI || !category) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing required fields: imageURI and category are required.",
+      });
     }
 
-    console.log("🔹 Minting Background:", { imageURI, category, price });
-    const tx = await contract.mintBackground(
-      imageURI,
-      category,
-      ethers.parseEther(price.toString())
-    );
+    console.log("🔹 Minting Background:", { imageURI, category });
+    const tx = await contract.mintBackground(imageURI, category);
     const receipt = await tx.wait();
     console.log("🔍 Transaction Receipt:", receipt);
 
@@ -431,7 +621,6 @@ app.post("/api/background/mint", async (req, res) => {
       artistAddress: wallet.address,
       imageURI,
       category,
-      price,
     });
 
     console.log(`✅ Background Minted and Saved to DB - ID: ${backgroundId}`);
@@ -439,54 +628,7 @@ app.post("/api/background/mint", async (req, res) => {
     res.json({
       success: true,
       transactionHash: tx.hash,
-      etherscanUrl: `https://sepolia.etherscan.io/tx/${transactionHash}`,
-      giftCardId,
-      giftCard,
-    });
-  } catch (error) {
-    handleError(error, res);
-  }
-});
-
-// Calculate required ETH for minting a gift card
-app.post("/api/giftcard/price", async (req, res) => {
-  try {
-    const { backgroundId, price } = req.body;
-    if (!backgroundId || !price) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing required fields: backgroundId and price are required.",
-      });
-    }
-
-    // Optionally verify background exists
-    const background = await Background.findByPk(backgroundId);
-    if (!background) {
-      return res.status(404).json({
-        success: false,
-        error: "Background not found with the given ID.",
-      });
-    }
-
-    const backgroundPrice = ethers.parseEther(price.toString());
-    const PLATFORM_FEE_IN_WEI = BigInt("611111111111111");
-    const taxFee = (backgroundPrice * 4n) / 100n;
-    const climateFee = backgroundPrice / 100n;
-    const totalRequired =
-      backgroundPrice + PLATFORM_FEE_IN_WEI + taxFee + climateFee;
-
-    res.json({
-      success: true,
       backgroundId,
-      price: price.toString(),
-      breakdown: {
-        backgroundPrice: backgroundPrice.toString(),
-        platformFee: PLATFORM_FEE_IN_WEI.toString(),
-        taxFee: taxFee.toString(),
-        climateFee: climateFee.toString(),
-      },
-      totalRequired: totalRequired.toString(),
-      totalRequiredEth: ethers.formatEther(totalRequired),
     });
   } catch (error) {
     handleError(error, res);
@@ -575,120 +717,72 @@ app.post(
         });
       }
 
-      // Require blockchain to be enabled for gift card creation
-      if (!blockchainEnabled || !contract) {
-        return res.status(503).json({
-          success: false,
-          error:
-            "Blockchain is not enabled. Gift card creation requires blockchain connectivity.",
-        });
-      }
-
       let giftCardId;
       let transactionHash;
 
-      // Calculate total required ETH as per contract logic
-      const backgroundPrice = ethers.parseEther(price.toString());
-      const PLATFORM_FEE_IN_WEI = BigInt("611111111111111");
-      const taxFee = (backgroundPrice * 4n) / 100n;
-      const climateFee = backgroundPrice / 100n;
-      const totalRequired =
-        backgroundPrice + PLATFORM_FEE_IN_WEI + taxFee + climateFee;
-
-      // Create Gift Card on blockchain
-      console.log("🔹 Creating Gift Card on blockchain:", {
-        backgroundId,
-        price,
-        message,
-      });
-      let receipt;
-      try {
-        const tx = await contract.createGiftCard(backgroundId, message, {
-          value: totalRequired,
+      // Check if blockchain functionality is enabled and contract is available
+      if (blockchainEnabled && contract) {
+        console.log("🔹 Creating Gift Card on blockchain:", {
+          backgroundId,
+          price,
+          message,
         });
-        receipt = await tx.wait();
+        try {
+          const tx = await contract.createGiftCard(
+            backgroundId,
+            ethers.parseEther(price),
+            message
+          );
+          const receipt = await tx.wait();
+          console.log("🔍 Transaction Receipt:", receipt);
 
-        const event = receipt.logs.find(
-          (log) => log.fragment && log.fragment.name === "GiftCardCreated"
-        );
-        if (!event) {
-          const errMsg =
-            "GiftCardCreated event not found in transaction receipt. Possible ABI mismatch or contract did not emit event.";
-          console.error(errMsg);
-          throw new Error(errMsg);
+          const event = receipt.logs.find(
+            (log) => log.fragment && log.fragment.name === "GiftCardCreated"
+          );
+          if (!event) {
+            throw new Error(
+              "GiftCardCreated event not found in transaction receipt."
+            );
+          }
+          giftCardId = event.args.giftCardId.toString();
+          transactionHash = receipt.hash;
+        } catch (error) {
+          console.error("Blockchain transaction failed:", error);
+          // Continue with database-only creation
+          giftCardId = `GC_${Date.now()}_${Math.random()
+            .toString(36)
+            .substr(2, 9)}`;
         }
-        giftCardId = event.args.giftCardId.toString();
-        transactionHash = receipt.hash;
-      } catch (error) {
-        // Enhanced error handling for blockchain failures
-        let debugMsg = "Blockchain error: ";
-        if (
-          error.code === "INSUFFICIENT_FUNDS" ||
-          (error.reason && error.reason.includes("insufficient funds"))
-        ) {
-          debugMsg +=
-            "Insufficient ETH sent. Please ensure the totalRequired amount is sent.";
-        } else if (
-          error.code === "CALL_EXCEPTION" ||
-          (error.reason && error.reason.includes("revert"))
-        ) {
-          debugMsg +=
-            "Smart contract reverted. Check if backgroundId exists and all require() conditions are met.";
-        } else if (
-          error.code === "UNPREDICTABLE_GAS_LIMIT" ||
-          (error.message && error.message.includes("out of gas"))
-        ) {
-          debugMsg +=
-            "Transaction ran out of gas. Try increasing the gas limit.";
-        } else if (
-          error.code === "NETWORK_ERROR" ||
-          (error.message && error.message.includes("network"))
-        ) {
-          debugMsg +=
-            "Network/provider error. Check your RPC provider (e.g., Alchemy/Infura) and network status.";
-        } else if (
-          error.code === "INVALID_ARGUMENT" ||
-          (error.message && error.message.includes("invalid argument"))
-        ) {
-          debugMsg +=
-            "Invalid argument sent to contract. Check contract ABI and input types.";
-        } else if (
-          error.code === "NONCE_EXPIRED" ||
-          (error.message && error.message.includes("nonce"))
-        ) {
-          debugMsg += "Nonce issue. Try resetting the backend wallet nonce.";
-        } else if (
-          error.code === "ACTION_REJECTED" ||
-          (error.message && error.message.includes("rejected"))
-        ) {
-          debugMsg += "Transaction was rejected by the wallet or network.";
-        } else if (
-          error.code === "SERVER_ERROR" ||
-          (error.message && error.message.includes("server error"))
-        ) {
-          debugMsg += "Server error from RPC provider.";
-        } else if (error.message && error.message.includes("event not found")) {
-          debugMsg +=
-            "Event not found in transaction receipt. Check contract ABI and event emission.";
-        } else if (error.message && error.message.includes("private key")) {
-          debugMsg +=
-            "Wallet/private key error. Check backend wallet configuration and funding.";
-        } else {
-          debugMsg += error.message || "Unknown blockchain error.";
-        }
-        console.error(debugMsg, error);
-        return res.status(500).json({
-          success: false,
-          error: debugMsg,
-          details: error.stack || error,
+      } else {
+        // Generate a unique ID for database-only creation
+        giftCardId = `GC_${Date.now()}_${Math.random()
+          .toString(36)
+          .substr(2, 9)}`;
+        console.log("🔹 Creating Gift Card in database only:", {
+          giftCardId,
+          backgroundId,
+          price,
+          message,
         });
       }
 
-      // Only save to DB if blockchain succeeded
+      // Increment background usage count
+      await background.increment("usageCount");
+      await background.save();
+
+      // Get the creator's wallet address from the request
+      const creatorAddress = req.headers.authorization
+        ? jwt.verify(
+            req.headers.authorization.split(" ")[1],
+            process.env.JWT_SECRET
+          ).walletAddress
+        : wallet.address;
+
+      // Save to database using Sequelize
       const giftCard = await GiftCard.create({
         id: giftCardId,
         backgroundId,
-        price: totalRequired.toString(), // Store the actual ETH collected
+        price: price.toString(),
         message,
         isClaimable: true,
         creatorAddress,
@@ -696,14 +790,9 @@ app.post(
         transactionHash,
       });
 
-      // Increment background usage count
-      await background.increment("usageCount");
-      await background.save();
-
       res.json({
         success: true,
         transactionHash,
-        etherscanUrl: `https://sepolia.etherscan.io/tx/${transactionHash}`,
         giftCardId,
         giftCard,
       });
@@ -820,22 +909,10 @@ app.post("/api/giftcard/transfer", async (req, res) => {
       });
     }
 
-    // Call the smart contract to transfer the gift card on-chain
     const tx = await contract.transferGiftCard(giftCardId, recipient);
     const receipt = await tx.wait();
 
-    // Find the GiftCardTransferred event in the logs (optional, if your contract emits it)
-    const event = receipt.logs.find(
-      (log) => log.fragment && log.fragment.name === "GiftCardTransferred"
-    );
-    if (!event) {
-      // Optionally warn, but still proceed if the transaction succeeded
-      console.warn(
-        "GiftCardTransferred event not found in transaction receipt"
-      );
-    }
-
-    // Update database only after successful on-chain transfer
+    // Update database
     const giftCard = await GiftCard.findByPk(giftCardId);
     if (giftCard) {
       await giftCard.update({ currentOwner: recipient });
@@ -847,7 +924,6 @@ app.post("/api/giftcard/transfer", async (req, res) => {
         toAddress: recipient,
         transactionType: "TRANSFER",
         amount: 0,
-        transactionHash: tx.hash,
       });
     }
 
@@ -855,11 +931,7 @@ app.post("/api/giftcard/transfer", async (req, res) => {
       updateUserStats(wallet.address),
       updateUserStats(recipient),
     ]);
-    res.json({
-      success: true,
-      transactionHash: tx.hash,
-      etherscanUrl: `https://sepolia.etherscan.io/tx/${tx.hash}`,
-    });
+    res.json({ success: true, transactionHash: tx.hash });
   } catch (error) {
     handleError(error, res);
   }
@@ -933,7 +1005,7 @@ app.post("/api/giftcard/claim", async (req, res) => {
       });
     }
 
-    console.log("🔹 Claiming Gift Card on blockchain:", { giftCardId });
+    console.log("🔹 Claiming Gift Card:", { giftCardId });
     const tx = await contract.claimGiftCard(giftCardId, secret);
     const receipt = await tx.wait();
     console.log("🔍 Transaction Receipt:", receipt);
@@ -949,7 +1021,7 @@ app.post("/api/giftcard/claim", async (req, res) => {
       });
     }
 
-    // Only update DB if on-chain claim succeeded
+    // Update database
     const giftCard = await GiftCard.findByPk(giftCardId);
     if (giftCard) {
       await giftCard.update({
@@ -965,7 +1037,6 @@ app.post("/api/giftcard/claim", async (req, res) => {
         toAddress: wallet.address,
         transactionType: "CLAIM",
         amount: 0,
-        transactionHash: tx.hash,
       });
     }
 
@@ -973,11 +1044,7 @@ app.post("/api/giftcard/claim", async (req, res) => {
       updateUserStats(wallet.address),
       updateUserStats(giftCard.creatorAddress),
     ]);
-    res.json({
-      success: true,
-      transactionHash: tx.hash,
-      etherscanUrl: `https://sepolia.etherscan.io/tx/${tx.hash}`,
-    });
+    res.json({ success: true, transactionHash: tx.hash });
   } catch (error) {
     handleError(error, res);
   }
@@ -1499,6 +1566,7 @@ app.get("/api/users/:walletAddress/activity", async (req, res) => {
   }
 });
 
+
 // Get User Profile with Received and Sent Gift Cards
 app.get("/api/profile/:walletAddress", async (req, res) => {
   try {
@@ -1506,7 +1574,7 @@ app.get("/api/profile/:walletAddress", async (req, res) => {
     if (!walletAddress) {
       return res.status(400).json({
         success: false,
-        error: "Wallet address is required",
+        error: "Wallet address is required"
       });
     }
 
@@ -1515,11 +1583,11 @@ app.get("/api/profile/:walletAddress", async (req, res) => {
       where: {
         currentOwner: walletAddress,
         creatorAddress: {
-          [Op.ne]: walletAddress, // Not equal to user's address
-        },
+          [Op.ne]: walletAddress // Not equal to user's address
+        }
       },
       include: [{ model: Background }],
-      order: [["createdAt", "DESC"]],
+      order: [["createdAt", "DESC"]]
     });
 
     // Find sent cards (where user is creator but not current owner)
@@ -1527,11 +1595,11 @@ app.get("/api/profile/:walletAddress", async (req, res) => {
       where: {
         creatorAddress: walletAddress,
         currentOwner: {
-          [Op.ne]: walletAddress, // Not equal to user's address
-        },
+          [Op.ne]: walletAddress // Not equal to user's address
+        }
       },
       include: [{ model: Background }],
-      order: [["createdAt", "DESC"]],
+      order: [["createdAt", "DESC"]]
     });
 
     res.json({
@@ -1539,8 +1607,8 @@ app.get("/api/profile/:walletAddress", async (req, res) => {
       profile: {
         address: walletAddress,
         receivedCards,
-        sentCards,
-      },
+        sentCards
+      }
     });
   } catch (error) {
     handleError(error, res);

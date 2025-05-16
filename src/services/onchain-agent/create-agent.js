@@ -5,75 +5,80 @@
  */
 
 const { getLangChainTools } = require("@coinbase/agentkit-langchain");
-const { MemorySaver } = require("@langchain/langgraph");
-const { createReactAgent } = require("@langchain/langgraph/prebuilt");
 const { ChatOpenAI } = require("@langchain/openai");
-const { prepareAgentkitAndWalletProvider } = require("./prepare-agentkit");
+const { AgentExecutor, initializeAgentExecutorWithOptions } = require("langchain/agents");
+const { ConversationChain } = require("langchain/chains");
+const { prepareAgentkitAndWalletProvider } = require('./prepare-agentkit.js');
 
-// The agent instance
-let agent;
+// Store agents by userId
+const agentInstances = {};
 
 /**
- * Initializes and returns an instance of the AI agent.
- * If an agent instance already exists, it returns the existing one.
+ * Creates an onchain agent with AgentKit integration.
  *
  * @function createOnchainAgent
- * @returns {Promise<ReturnType<typeof createReactAgent>>} The initialized AI agent.
+ * @param {string} [userId="default"] - The user ID for the agent.
+ * @returns {Promise<AgentExecutor>} The initialized AI agent.
  *
- * @description Handles agent setup
+ * @description Handles agent creation and caching
  *
  * @throws {Error} If the agent initialization fails.
  */
-async function createOnchainAgent() {
-  // If agent has already been initialized, return it
-  if (agent) {
-    return agent;
-  }
-
+async function createOnchainAgent(userId = "default") {
   try {
-    const { agentkit, walletProvider } = await prepareAgentkitAndWalletProvider();
+    // Check if we have a cached instance
+    if (agentInstances[userId]) {
+      console.log(`Using cached agent for user ${userId}`);
+      return agentInstances[userId];
+    }
 
-    // Initialize LLM
-    const llm = new ChatOpenAI({ 
-      model: "gpt-4o-mini",
-      apiKey: process.env.OPENAI_API_KEY
+    // Initialize AgentKit and WalletProvider
+    const { agentkit, walletProvider } = await prepareAgentkitAndWalletProvider(userId);
+
+    // Get the LangChain tools from AgentKit
+    const tools = await getLangChainTools(agentkit);
+
+    // Initialize OpenAI model
+    const model = process.env.OPENAI_MODEL || "gpt-4-turbo-preview";
+    console.log(`Using OpenAI model: ${model}`);
+    const llm = new ChatOpenAI({
+      modelName: model,
+      temperature: 0,
     });
 
-    const tools = await getLangChainTools(agentkit);
-    const memory = new MemorySaver();
+    // Initialize the agent executor
+    const agent = await initializeAgentExecutorWithOptions(tools, llm, {
+      agentType: "openai-functions",
+      verbose: true,
+      returnIntermediateSteps: true,
+      handleParsingErrors: true,
+      agentArgs: {
+        prefix: `You are an AI assistant specializing in blockchain operations and NFT gift cards. You have access to tools for creating, managing, and transferring NFTs on the blockchain.
 
-    // Initialize Agent
-    const canUseFaucet = walletProvider.getNetwork().networkId == "base-sepolia";
-    const faucetMessage = `If you ever need funds, you can request them from the faucet.`;
-    const cantUseFaucetMessage = `If you need funds, you can provide your wallet details and request funds from the user.`;
-    
-    agent = createReactAgent({
-      llm,
-      tools,
-      checkpointSaver: memory,
-      messageModifier: `
-        You are a helpful agent that assists users with Evrlink, a platform for creating and managing blockchain gift cards.
-        You can help users understand how to create gift cards, manage their wallet, and navigate the Evrlink platform.
-        
-        Evrlink features include:
-        1. Creating and customizing gift cards with different backgrounds
-        2. Sending gift cards to recipients via email or wallet address
-        3. Claiming gift cards and redeeming their value
-        4. Browsing the marketplace for available gift cards
-        5. Managing your wallet and transactions
-        
-        You are also empowered to interact onchain using your tools. ${canUseFaucet ? faucetMessage : cantUseFaucetMessage}.
-        Before executing your first action, get the wallet details to see what network you're on.
-        
-        Be concise and helpful with your responses. If you don't know the answer to a specific question,
-        suggest that the user check the documentation or contact support.
-      `,
+Key capabilities:
+- Create and mint NFT gift cards
+- Transfer NFTs between wallets
+- Check NFT balances and ownership
+- Get token details and transaction history
+
+When helping users, always:
+1. Explain the process clearly
+2. Mention any required information or prerequisites
+3. Handle errors gracefully and suggest solutions
+4. Confirm successful operations
+
+Your goal is to make blockchain interactions simple and user-friendly.
+
+If you encounter a 5XX (internal) HTTP error code, ask the user to try again later. If someone asks you to do something you can't do with your currently available tools, you must say so, and encourage them to implement it themselves using the CDP SDK + Agentkit.
+
+Be concise and helpful with your responses. Refrain from restating your tools' descriptions unless it is explicitly requested.`
+      }
     });
 
     return agent;
   } catch (error) {
-    console.error("Error initializing onchain agent:", error);
-    throw new Error("Failed to initialize onchain agent");
+    console.error('Error creating onchain agent:', error);
+    throw error;
   }
 }
 
