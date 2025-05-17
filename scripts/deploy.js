@@ -13,7 +13,7 @@ async function main() {
   console.log("💰 Account balance:", hre.ethers.formatEther(balance), "ETH");
 
   // Check if the deployer has enough balance
-  if (parseFloat(hre.ethers.formatEther(balance)) < 0.01) {
+  if (parseFloat(hre.ethers.formatEther(balance)) < 0.001) {
     console.error("❌ Insufficient balance to deploy the contract.");
     process.exit(1);
   }
@@ -30,11 +30,35 @@ async function main() {
     process.exit(1);
   }
 
-  // Deploy the contract with constructor arguments
-  console.log("📦 Deploying the NFTGiftMarketplace contract...");
+  // Get the contract factory
   const NFTGiftMarketplace = await hre.ethers.getContractFactory(
     "NFTGiftMarketplace"
   );
+
+  // Estimate deployment gas and cost before deploying
+  const deploymentTx = NFTGiftMarketplace.getDeployTransaction(
+    platformAddress,
+    climateAddress,
+    taxAddress
+  );
+  const estimatedGas = await hre.ethers.provider.estimateGas({
+    ...deploymentTx,
+    from: deployer.address,
+  });
+  const feeData = await hre.ethers.provider.getFeeData();
+  const currentGasPrice = feeData.gasPrice;
+  const estimatedCost = estimatedGas * currentGasPrice;
+  console.log(
+    `🧮 Estimated deployment cost: ${hre.ethers.formatEther(
+      estimatedCost.toString()
+    )} ETH (Estimated gas: ${estimatedGas}, Gas price: ${hre.ethers.formatUnits(
+      currentGasPrice,
+      "gwei"
+    )} gwei)`
+  );
+
+  // Deploy the contract with constructor arguments
+  console.log("📦 Deploying the NFTGiftMarketplace contract...");
   const nftGiftMarketplace = await NFTGiftMarketplace.deploy(
     platformAddress,
     climateAddress,

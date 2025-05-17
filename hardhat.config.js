@@ -1,4 +1,5 @@
 require("@nomicfoundation/hardhat-toolbox");
+require("@nomicfoundation/hardhat-verify");
 require("dotenv").config();
 
 /** @type import('hardhat/config').HardhatUserConfig */
@@ -14,15 +15,34 @@ module.exports = {
   },
   networks: {
     sepolia: {
-      url: process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia.blockpi.network/v1/rpc/public", // Default RPC URL
+      url:
+        process.env.SEPOLIA_RPC_URL ||
+        "https://ethereum-sepolia.blockpi.network/v1/rpc/public",
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
+    base_sepolia: {
+      url: process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org",
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      chainId: 84532,
     },
     hardhat: {
       chainId: 31337,
     },
   },
   etherscan: {
-    apiKey: process.env.ETHERSCAN_API_KEY || "", // Ensuring a default value
+    customChains: [
+      {
+        network: "baseSepolia",
+        chainId: 84532,
+        urls: {
+          apiURL: "https://api-sepolia.basescan.org/api",
+          browserURL: "https://sepolia.basescan.org",
+        },
+      },
+    ],
+    apiKey: {
+      baseSepolia: process.env.BASESCAN_API_KEY,
+    },
   },
   paths: {
     sources: "./contracts",
