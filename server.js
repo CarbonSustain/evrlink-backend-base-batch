@@ -30,7 +30,13 @@ app.use(
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        imgSrc: ["'self'", "data:", "https://api.evrlink.com", "https://evrlink.com", "*"],
+        imgSrc: [
+          "'self'",
+          "data:",
+          "https://api.evrlink.com",
+          "https://evrlink.com",
+          "*",
+        ],
       },
     },
   })
@@ -105,7 +111,9 @@ app.use(
           next();
         } catch (error) {
           console.error(`Error creating placeholder: ${error.message}`);
-          res.status(404).send("Image not found and failed to create placeholder");
+          res
+            .status(404)
+            .send("Image not found and failed to create placeholder");
         }
       } else {
         // Return 404
@@ -185,24 +193,36 @@ const { createAgent } = require("./src/services/agent.service");
 
 try {
   // Check if required environment variables are set
-  const requiredEnvVars = ["PRIVATE_KEY", "SEPOLIA_RPC_URL", "CONTRACT_ADDRESS"];
-  const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+  // Remove Sepolia references and use Base Sepolia
+  const requiredEnvVars = [
+    "PRIVATE_KEY",
+    "BASE_SEPOLIA_RPC_URL",
+    "CONTRACT_ADDRESS",
+  ];
+  const missingVars = requiredEnvVars.filter(
+    (varName) => !process.env[varName]
+  );
 
   if (missingVars.length > 0) {
-    console.warn(`Missing blockchain environment variables: ${missingVars.join(", ")}`);
+    console.warn(
+      `Missing blockchain environment variables: ${missingVars.join(", ")}`
+    );
     console.warn("Blockchain features will be disabled");
   } else {
-    // Handle both ethers v5 and v6
     let provider;
     if (ethers.providers && ethers.providers.JsonRpcProvider) {
       // ethers v5
-      provider = new ethers.providers.JsonRpcProvider(process.env.SEPOLIA_RPC_URL.trim());
+      provider = new ethers.providers.JsonRpcProvider(
+        process.env.BASE_SEPOLIA_RPC_URL.trim()
+      );
     } else {
       // ethers v6
-      provider = new ethers.JsonRpcProvider(process.env.SEPOLIA_RPC_URL.trim());
+      provider = new ethers.JsonRpcProvider(
+        process.env.BASE_SEPOLIA_RPC_URL.trim()
+      );
     }
 
-    // Setup wallet and contract
+    // Only use this for all blockchain actions
     const privateKey = process.env.PRIVATE_KEY.trim();
     wallet = new ethers.Wallet(privateKey, provider);
 
@@ -259,11 +279,11 @@ app.blockchainEnabled = blockchainEnabled;
 // Initialize agent
 let agent = null;
 createAgent()
-  .then(a => {
+  .then((a) => {
     agent = a;
     console.log("Agent initialized successfully");
   })
-  .catch(error => {
+  .catch((error) => {
     console.error("Failed to initialize agent:", error);
   });
 
@@ -277,7 +297,8 @@ const handleError = (error, res) => {
   if (error.code === "INSUFFICIENT_FUNDS") {
     return res.status(400).json({
       success: false,
-      error: "Insufficient funds. Please try with a smaller amount or get more Sepolia ETH.",
+      error:
+        "Insufficient funds. Please try with a smaller amount or get more Sepolia ETH.",
     });
   }
   if (error.code === "NETWORK_ERROR") {
@@ -382,38 +403,51 @@ app.post("/api/backgrounds", upload.single("image"), async (req, res) => {
     // Construct image URL (adjust as per your storage setup)
     const imageUrl = `https://${process.env.S3_BUCKET_NAME}.s3.us-west-2.amazonaws.com/${req.fileName}`;
 
-    // Create DB record first
+    // Mint on blockchain with new contract logic
+    let tx, receipt, event, backgroundId;
+    try {
+      tx = await contract.mintBackground(
+        imageUrl,
+        category,
+        ethers.parseEther(price.toString())
+      );
+      receipt = await tx.wait();
+
+      // Extract backgroundId from event logs (as before)
+      event = receipt.logs.find((log) => {
+        try {
+          return log.fragment && log.fragment.name === "BackgroundMinted";
+        } catch (err) {
+          console.log("Error checking log fragment:", err);
+          return false;
+        }
+      });
+
+      if (!event) {
+        return res.status(500).json({
+          success: false,
+          error: "BackgroundMinted event not found in transaction receipt.",
+        });
+      }
+      backgroundId = event.args.backgroundId.toString();
+    } catch (error) {
+      console.error("Error minting background on-chain:", error);
+      return res
+        .status(500)
+        .json({ error: "Failed to mint background on-chain" });
+    }
+
+    // Only create DB record if on-chain mint succeeded
     const localBackground = await Background.create({
+      id: backgroundId, // Use blockchain ID
       artistAddress: req.body.artistAddress || null,
       imageURI: imageUrl,
       category,
       price,
       usageCount: 0,
+      blockchainId: backgroundId,
+      blockchainTxHash: tx.hash,
     });
-
-    // Mint on blockchain with new contract logic
-    const tx = await contract.mintBackground(imageUrl, category, ethers.parseEther(price.toString()));
-    const receipt = await tx.wait();
-
-    // Extract backgroundId from event logs (as before)
-    const event = receipt.logs.find(log => {
-      try {
-        return log.fragment && log.fragment.name === "BackgroundMinted";
-      } catch (err) {
-        console.log("Error checking log fragment:", err);
-        return false;
-      }
-    });
-
-    if (event) {
-      const backgroundId = event.args.backgroundId.toString();
-      await localBackground.update({
-        blockchainId: backgroundId,
-        blockchainTxHash: tx.hash,
-      });
-    } else {
-      console.warn("BackgroundMinted event not found in transaction receipt");
-    }
 
     res.status(201).json({
       success: true,
@@ -426,8 +460,8 @@ app.post("/api/backgrounds", upload.single("image"), async (req, res) => {
         blockchainTxHash: localBackground.blockchainTxHash,
         blockchainId: localBackground.blockchainId,
         transactionHash: localBackground.blockchainTxHash,
-        etherscanUrl: localBackground.blockchainTxHash
-          ? `https://sepolia.etherscan.io/tx/${localBackground.blockchainTxHash}`
+        basescanUrl: localBackground.blockchainTxHash
+          ? `https://sepolia.basescan.org/tx/${localBackground.blockchainTxHash}`
           : null,
       },
     });
@@ -449,11 +483,17 @@ app.post("/api/background/mint", async (req, res) => {
     }
 
     console.log("🔹 Minting Background:", { imageURI, category, price });
-    const tx = await contract.mintBackground(imageURI, category, ethers.parseEther(price.toString()));
+    const tx = await contract.mintBackground(
+      imageURI,
+      category,
+      ethers.parseEther(price.toString())
+    );
     const receipt = await tx.wait();
     console.log("🔍 Transaction Receipt:", receipt);
 
-    const event = receipt.logs.find(log => log.fragment && log.fragment.name === "BackgroundMinted");
+    const event = receipt.logs.find(
+      (log) => log.fragment && log.fragment.name === "BackgroundMinted"
+    );
     if (!event) {
       return res.status(500).json({
         success: false,
@@ -476,7 +516,7 @@ app.post("/api/background/mint", async (req, res) => {
     res.json({
       success: true,
       transactionHash: tx.hash,
-      etherscanUrl: `https://sepolia.etherscan.io/tx/${transactionHash}`,
+      basescanUrl: `https://sepolia.basescan.org/tx/${transactionHash}`,
       giftCardId,
       giftCard,
     });
@@ -509,7 +549,8 @@ app.post("/api/giftcard/price", async (req, res) => {
     const PLATFORM_FEE_IN_WEI = BigInt("611111111111111");
     const taxFee = (backgroundPrice * 4n) / 100n;
     const climateFee = backgroundPrice / 100n;
-    const totalRequired = backgroundPrice + PLATFORM_FEE_IN_WEI + taxFee + climateFee;
+    const totalRequired =
+      backgroundPrice + PLATFORM_FEE_IN_WEI + taxFee + climateFee;
 
     res.json({
       success: true,
@@ -612,9 +653,13 @@ app.post("/api/auth/email-wallet", async (req, res) => {
     );
 
     if (created) {
-      return res.status(201).json({ message: "User created successfully", user });
+      return res
+        .status(201)
+        .json({ message: "User created successfully", user });
     } else {
-      return res.status(200).json({ message: "User updated successfully", user });
+      return res
+        .status(200)
+        .json({ message: "User updated successfully", user });
     }
   } catch (error) {
     console.error(error);
@@ -630,7 +675,9 @@ app.post("/email-wallet", async (req, res) => {
 
     if (!email || !walletAddress) {
       console.log("Missing email or walletAddress in request");
-      return res.status(400).json({ error: "Email and wallet address are required" });
+      return res
+        .status(400)
+        .json({ error: "Email and wallet address are required" });
     }
 
     // Use raw SQL instead of Sequelize ORM to avoid schema issues
@@ -656,24 +703,35 @@ app.post("/email-wallet", async (req, res) => {
         console.log("email_wallets table created successfully");
       } catch (createError) {
         console.error("Failed to create email_wallets table:", createError);
-        return res.status(500).json({ error: "Database schema issue: failed to create email_wallets table" });
+        return res.status(500).json({
+          error: "Database schema issue: failed to create email_wallets table",
+        });
       }
     }
 
     // Check if user exists in the users table
     console.log("Checking if user exists for wallet address:", walletAddress);
-    const users = await sequelize.query(`SELECT id FROM users WHERE wallet_address = $1`, {
-      bind: [walletAddress],
-      type: sequelize.QueryTypes.SELECT,
-    });
+    const users = await sequelize.query(
+      `SELECT id FROM users WHERE wallet_address = $1`,
+      {
+        bind: [walletAddress],
+        type: sequelize.QueryTypes.SELECT,
+      }
+    );
 
     // Create user if it doesn't exist
     if (!users || users.length === 0) {
-      console.log("User not found, creating new user with wallet address:", walletAddress);
+      console.log(
+        "User not found, creating new user with wallet address:",
+        walletAddress
+      );
       try {
-        await sequelize.query(`INSERT INTO users (wallet_address) VALUES ($1)`, {
-          bind: [walletAddress],
-        });
+        await sequelize.query(
+          `INSERT INTO users (wallet_address) VALUES ($1)`,
+          {
+            bind: [walletAddress],
+          }
+        );
         console.log("User created successfully");
       } catch (userError) {
         console.error("Error creating user:", userError);
@@ -684,26 +742,41 @@ app.post("/email-wallet", async (req, res) => {
     }
 
     // Check if email is already associated with a wallet
-    console.log("Checking if email is already associated with a wallet:", email);
-    const emailWallets = await sequelize.query(`SELECT id, wallet_address FROM email_wallets WHERE email = $1`, {
-      bind: [email],
-      type: sequelize.QueryTypes.SELECT,
-    });
+    console.log(
+      "Checking if email is already associated with a wallet:",
+      email
+    );
+    const emailWallets = await sequelize.query(
+      `SELECT id, wallet_address FROM email_wallets WHERE email = $1`,
+      {
+        bind: [email],
+        type: sequelize.QueryTypes.SELECT,
+      }
+    );
 
     if (emailWallets && emailWallets.length > 0) {
       // Update the existing association
-      console.log("Email already associated with wallet, updating to:", walletAddress);
-      await sequelize.query(`UPDATE email_wallets SET wallet_address = $1 WHERE email = $2`, {
-        bind: [walletAddress, email],
-      });
+      console.log(
+        "Email already associated with wallet, updating to:",
+        walletAddress
+      );
+      await sequelize.query(
+        `UPDATE email_wallets SET wallet_address = $1 WHERE email = $2`,
+        {
+          bind: [walletAddress, email],
+        }
+      );
       console.log("Updated email-wallet association");
     } else {
       // Create a new association
       console.log("Creating new email-wallet association");
       try {
-        await sequelize.query(`INSERT INTO email_wallets (email, wallet_address) VALUES ($1, $2)`, {
-          bind: [email, walletAddress],
-        });
+        await sequelize.query(
+          `INSERT INTO email_wallets (email, wallet_address) VALUES ($1, $2)`,
+          {
+            bind: [email, walletAddress],
+          }
+        );
         console.log("Created new email-wallet association");
       } catch (insertError) {
         console.error("Error creating email-wallet association:", insertError);
@@ -733,7 +806,9 @@ app.post("/email-wallet", async (req, res) => {
     });
   } catch (error) {
     console.error("Email-wallet association error:", error);
-    res.status(500).json({ error: "Failed to associate email with wallet: " + error.message });
+    res.status(500).json({
+      error: "Failed to associate email with wallet: " + error.message,
+    });
   }
 });
 
@@ -763,10 +838,13 @@ app.get("/email-wallet", async (req, res) => {
     }
 
     // Find email-wallet association
-    const emailWallets = await sequelize.query(`SELECT wallet_address FROM email_wallets WHERE email = $1`, {
-      bind: [email],
-      type: sequelize.QueryTypes.SELECT,
-    });
+    const emailWallets = await sequelize.query(
+      `SELECT wallet_address FROM email_wallets WHERE email = $1`,
+      {
+        bind: [email],
+        type: sequelize.QueryTypes.SELECT,
+      }
+    );
 
     if (!emailWallets || emailWallets.length === 0) {
       console.log("No wallet found for email:", email);
@@ -786,7 +864,9 @@ app.get("/email-wallet", async (req, res) => {
     });
   } catch (error) {
     console.error("Get wallet by email error:", error);
-    res.status(500).json({ error: "Failed to get wallet for email: " + error.message });
+    res
+      .status(500)
+      .json({ error: "Failed to get wallet for email: " + error.message });
   }
 });
 
@@ -805,7 +885,10 @@ app.get("/api/auth/email-wallet", async (req, res) => {
     const user = await User.findOne({ where: { email } });
 
     if (user) {
-      console.log("Found user with matching email in users table:", user.walletAddress);
+      console.log(
+        "Found user with matching email in users table:",
+        user.walletAddress
+      );
       return res.json({
         success: true,
         email,
@@ -829,10 +912,13 @@ app.get("/api/auth/email-wallet", async (req, res) => {
     }
 
     // Find email-wallet association
-    const emailWallets = await sequelize.query(`SELECT wallet_address FROM email_wallets WHERE email = $1`, {
-      bind: [email],
-      type: sequelize.QueryTypes.SELECT,
-    });
+    const emailWallets = await sequelize.query(
+      `SELECT wallet_address FROM email_wallets WHERE email = $1`,
+      {
+        bind: [email],
+        type: sequelize.QueryTypes.SELECT,
+      }
+    );
 
     if (!emailWallets || emailWallets.length === 0) {
       console.log("No wallet found for email:", email);
@@ -843,7 +929,11 @@ app.get("/api/auth/email-wallet", async (req, res) => {
     }
 
     const walletAddress = emailWallets[0].wallet_address;
-    console.log("Found wallet for email in email_wallets table:", email, walletAddress);
+    console.log(
+      "Found wallet for email in email_wallets table:",
+      email,
+      walletAddress
+    );
 
     res.json({
       success: true,
@@ -852,132 +942,173 @@ app.get("/api/auth/email-wallet", async (req, res) => {
     });
   } catch (error) {
     console.error("Get wallet by email error:", error);
-    res.status(500).json({ error: "Failed to get wallet for email: " + error.message });
+    res
+      .status(500)
+      .json({ error: "Failed to get wallet for email: " + error.message });
   }
 });
 
 // Create Gift Card
-app.post(["/api/giftcard/create", "/api/gift-cards/create"], async (req, res) => {
-  try {
-    const { backgroundId, price, message } = req.body;
-    if (!backgroundId || !price) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing required fields: backgroundId and price are required.",
-      });
-    }
-
-    // First verify the background exists in database
-    const background = await Background.findByPk(backgroundId);
-    if (!background) {
-      return res.status(404).json({
-        success: false,
-        error: "Background not found with the given ID.",
-      });
-    }
-
-    // Require blockchain to be enabled for gift card creation
-    if (!blockchainEnabled || !contract) {
-      return res.status(503).json({
-        success: false,
-        error: "Blockchain is not enabled. Gift card creation requires blockchain connectivity.",
-      });
-    }
-
-    let giftCardId;
-    let transactionHash;
-
-    // Calculate total required ETH as per contract logic
-    const backgroundPrice = ethers.parseEther(price.toString());
-    const PLATFORM_FEE_IN_WEI = BigInt("611111111111111");
-    const taxFee = (backgroundPrice * 4n) / 100n;
-    const climateFee = backgroundPrice / 100n;
-    const totalRequired = backgroundPrice + PLATFORM_FEE_IN_WEI + taxFee + climateFee;
-
-    // Create Gift Card on blockchain
-    console.log("🔹 Creating Gift Card on blockchain:", {
-      backgroundId,
-      price,
-      message,
-    });
-    let receipt;
+app.post(
+  ["/api/giftcard/create", "/api/gift-cards/create"],
+  async (req, res) => {
     try {
-      const tx = await contract.createGiftCard(backgroundId, message, {
-        value: totalRequired,
-      });
-      receipt = await tx.wait();
-
-      const event = receipt.logs.find(log => log.fragment && log.fragment.name === "GiftCardCreated");
-      if (!event) {
-        const errMsg =
-          "GiftCardCreated event not found in transaction receipt. Possible ABI mismatch or contract did not emit event.";
-        console.error(errMsg);
-        throw new Error(errMsg);
+      const { backgroundId, price, message } = req.body;
+      if (!backgroundId || !price) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "Missing required fields: backgroundId and price are required.",
+        });
       }
-      giftCardId = event.args.giftCardId.toString();
-      transactionHash = receipt.hash;
+
+      // First verify the background exists in database
+      const background = await Background.findByPk(backgroundId);
+      if (!background) {
+        return res.status(404).json({
+          success: false,
+          error: "Background not found with the given ID.",
+        });
+      }
+
+      // Require blockchain to be enabled for gift card creation
+      if (!blockchainEnabled || !contract) {
+        return res.status(503).json({
+          success: false,
+          error:
+            "Blockchain is not enabled. Gift card creation requires blockchain connectivity.",
+        });
+      }
+
+      let giftCardId;
+      let transactionHash;
+
+      // Calculate total required ETH as per contract logic
+      const backgroundPrice = ethers.parseEther(price.toString());
+      const PLATFORM_FEE_IN_WEI = BigInt("611111111111111");
+      const taxFee = (backgroundPrice * 4n) / 100n;
+      const climateFee = backgroundPrice / 100n;
+      const totalRequired =
+        backgroundPrice + PLATFORM_FEE_IN_WEI + taxFee + climateFee;
+
+      // Create Gift Card on blockchain
+      console.log("🔹 Creating Gift Card on blockchain:", {
+        backgroundId,
+        price,
+        message,
+      });
+      let receipt;
+      try {
+        const tx = await contract.createGiftCard(backgroundId, message, {
+          value: totalRequired,
+        });
+        receipt = await tx.wait();
+
+        const event = receipt.logs.find(
+          (log) => log.fragment && log.fragment.name === "GiftCardCreated"
+        );
+        if (!event) {
+          const errMsg =
+            "GiftCardCreated event not found in transaction receipt. Possible ABI mismatch or contract did not emit event.";
+          console.error(errMsg);
+          throw new Error(errMsg);
+        }
+        giftCardId = event.args.giftCardId.toString();
+        transactionHash = receipt.hash;
+      } catch (error) {
+        // Enhanced error handling for blockchain failures
+        let debugMsg = "Blockchain error: ";
+        if (
+          error.code === "INSUFFICIENT_FUNDS" ||
+          (error.reason && error.reason.includes("insufficient funds"))
+        ) {
+          debugMsg +=
+            "Insufficient ETH sent. Please ensure the totalRequired amount is sent.";
+        } else if (
+          error.code === "CALL_EXCEPTION" ||
+          (error.reason && error.reason.includes("revert"))
+        ) {
+          debugMsg +=
+            "Smart contract reverted. Check if backgroundId exists and all require() conditions are met.";
+        } else if (
+          error.code === "UNPREDICTABLE_GAS_LIMIT" ||
+          (error.message && error.message.includes("out of gas"))
+        ) {
+          debugMsg +=
+            "Transaction ran out of gas. Try increasing the gas limit.";
+        } else if (
+          error.code === "NETWORK_ERROR" ||
+          (error.message && error.message.includes("network"))
+        ) {
+          debugMsg +=
+            "Network/provider error. Check your RPC provider (e.g., Alchemy/Infura) and network status.";
+        } else if (
+          error.code === "INVALID_ARGUMENT" ||
+          (error.message && error.message.includes("invalid argument"))
+        ) {
+          debugMsg +=
+            "Invalid argument sent to contract. Check contract ABI and input types.";
+        } else if (
+          error.code === "NONCE_EXPIRED" ||
+          (error.message && error.message.includes("nonce"))
+        ) {
+          debugMsg += "Nonce issue. Try resetting the backend wallet nonce.";
+        } else if (
+          error.code === "ACTION_REJECTED" ||
+          (error.message && error.message.includes("rejected"))
+        ) {
+          debugMsg += "Transaction was rejected by the wallet or network.";
+        } else if (
+          error.code === "SERVER_ERROR" ||
+          (error.message && error.message.includes("server error"))
+        ) {
+          debugMsg += "Server error from RPC provider.";
+        } else if (error.message && error.message.includes("event not found")) {
+          debugMsg +=
+            "Event not found in transaction receipt. Check contract ABI and event emission.";
+        } else if (error.message && error.message.includes("private key")) {
+          debugMsg +=
+            "Wallet/private key error. Check backend wallet configuration and funding.";
+        } else {
+          debugMsg += error.message || "Unknown blockchain error.";
+        }
+        console.error(debugMsg, error);
+        return res.status(500).json({
+          success: false,
+          error: debugMsg,
+          details: error.stack || error,
+        });
+      }
+
+      // Only save to DB if blockchain succeeded
+      const giftCard = await GiftCard.create({
+        id: giftCardId,
+        backgroundId,
+        price: totalRequired.toString(), // Store the actual ETH collected
+        message,
+        isClaimable: true,
+        creatorAddress,
+        currentOwner: creatorAddress,
+        transactionHash,
+      });
+
+      // Increment background usage count
+      await background.increment("usageCount");
+      await background.save();
+
+      res.json({
+        success: true,
+        transactionHash,
+        basescanUrl: `https://sepolia.basescan.org/tx/${transactionHash}`,
+        giftCardId,
+        giftCard,
+      });
     } catch (error) {
-      // Enhanced error handling for blockchain failures
-      let debugMsg = "Blockchain error: ";
-      if (error.code === "INSUFFICIENT_FUNDS" || (error.reason && error.reason.includes("insufficient funds"))) {
-        debugMsg += "Insufficient ETH sent. Please ensure the totalRequired amount is sent.";
-      } else if (error.code === "CALL_EXCEPTION" || (error.reason && error.reason.includes("revert"))) {
-        debugMsg += "Smart contract reverted. Check if backgroundId exists and all require() conditions are met.";
-      } else if (error.code === "UNPREDICTABLE_GAS_LIMIT" || (error.message && error.message.includes("out of gas"))) {
-        debugMsg += "Transaction ran out of gas. Try increasing the gas limit.";
-      } else if (error.code === "NETWORK_ERROR" || (error.message && error.message.includes("network"))) {
-        debugMsg += "Network/provider error. Check your RPC provider (e.g., Alchemy/Infura) and network status.";
-      } else if (error.code === "INVALID_ARGUMENT" || (error.message && error.message.includes("invalid argument"))) {
-        debugMsg += "Invalid argument sent to contract. Check contract ABI and input types.";
-      } else if (error.code === "NONCE_EXPIRED" || (error.message && error.message.includes("nonce"))) {
-        debugMsg += "Nonce issue. Try resetting the backend wallet nonce.";
-      } else if (error.code === "ACTION_REJECTED" || (error.message && error.message.includes("rejected"))) {
-        debugMsg += "Transaction was rejected by the wallet or network.";
-      } else if (error.code === "SERVER_ERROR" || (error.message && error.message.includes("server error"))) {
-        debugMsg += "Server error from RPC provider.";
-      } else if (error.message && error.message.includes("event not found")) {
-        debugMsg += "Event not found in transaction receipt. Check contract ABI and event emission.";
-      } else if (error.message && error.message.includes("private key")) {
-        debugMsg += "Wallet/private key error. Check backend wallet configuration and funding.";
-      } else {
-        debugMsg += error.message || "Unknown blockchain error.";
-      }
-      console.error(debugMsg, error);
-      return res.status(500).json({
-        success: false,
-        error: debugMsg,
-        details: error.stack || error,
-      });
+      console.error("Gift card creation error:", error);
+      handleError(error, res);
     }
-
-    // Only save to DB if blockchain succeeded
-    const giftCard = await GiftCard.create({
-      id: giftCardId,
-      backgroundId,
-      price: totalRequired.toString(), // Store the actual ETH collected
-      message,
-      isClaimable: true,
-      creatorAddress,
-      currentOwner: creatorAddress,
-      transactionHash,
-    });
-
-    // Increment background usage count
-    await background.increment("usageCount");
-    await background.save();
-
-    res.json({
-      success: true,
-      transactionHash,
-      etherscanUrl: `https://sepolia.etherscan.io/tx/${transactionHash}`,
-      giftCardId,
-      giftCard,
-    });
-  } catch (error) {
-    console.error("Gift card creation error:", error);
-    handleError(error, res);
   }
-});
+);
 
 // Get All Gift Cards with Pagination and Filters
 app.get("/api/giftcards", async (req, res) => {
@@ -1080,7 +1211,8 @@ app.post("/api/giftcard/transfer", async (req, res) => {
     if (!giftCardId || !recipient) {
       return res.status(400).json({
         success: false,
-        error: "Missing required fields: giftCardId and recipient are required.",
+        error:
+          "Missing required fields: giftCardId and recipient are required.",
       });
     }
 
@@ -1089,10 +1221,14 @@ app.post("/api/giftcard/transfer", async (req, res) => {
     const receipt = await tx.wait();
 
     // Find the GiftCardTransferred event in the logs (optional, if your contract emits it)
-    const event = receipt.logs.find(log => log.fragment && log.fragment.name === "GiftCardTransferred");
+    const event = receipt.logs.find(
+      (log) => log.fragment && log.fragment.name === "GiftCardTransferred"
+    );
     if (!event) {
       // Optionally warn, but still proceed if the transaction succeeded
-      console.warn("GiftCardTransferred event not found in transaction receipt");
+      console.warn(
+        "GiftCardTransferred event not found in transaction receipt"
+      );
     }
 
     // Update database only after successful on-chain transfer
@@ -1111,7 +1247,10 @@ app.post("/api/giftcard/transfer", async (req, res) => {
       });
     }
 
-    await Promise.all([updateUserStats(wallet.address), updateUserStats(recipient)]);
+    await Promise.all([
+      updateUserStats(wallet.address),
+      updateUserStats(recipient),
+    ]);
     res.json({
       success: true,
       transactionHash: tx.hash,
@@ -1156,7 +1295,10 @@ app.post("/api/giftcard/buy", async (req, res) => {
       });
     }
 
-    await Promise.all([updateUserStats(wallet.address), updateUserStats(giftCard.currentOwner)]);
+    await Promise.all([
+      updateUserStats(wallet.address),
+      updateUserStats(giftCard.currentOwner),
+    ]);
     res.json({ success: true, transactionHash: tx.hash });
   } catch (error) {
     handleError(error, res);
@@ -1193,7 +1335,9 @@ app.post("/api/giftcard/claim", async (req, res) => {
     console.log("🔍 Transaction Receipt:", receipt);
 
     // Find the GiftCardClaimed event
-    const event = receipt.logs.find(log => log.fragment && log.fragment.name === "GiftCardClaimed");
+    const event = receipt.logs.find(
+      (log) => log.fragment && log.fragment.name === "GiftCardClaimed"
+    );
     if (!event) {
       return res.status(500).json({
         success: false,
@@ -1221,7 +1365,10 @@ app.post("/api/giftcard/claim", async (req, res) => {
       });
     }
 
-    await Promise.all([updateUserStats(wallet.address), updateUserStats(giftCard.creatorAddress)]);
+    await Promise.all([
+      updateUserStats(wallet.address),
+      updateUserStats(giftCard.creatorAddress),
+    ]);
     res.json({
       success: true,
       transactionHash: tx.hash,
@@ -1237,22 +1384,23 @@ async function updateUserStats(walletAddress) {
   const user = await User.findOne({ where: { walletAddress } });
   if (!user) return;
 
-  const [createdCount, sentCount, receivedCount, mintedCount] = await Promise.all([
-    GiftCard.count({ where: { creatorAddress: walletAddress } }),
-    Transaction.count({
-      where: {
-        fromAddress: walletAddress,
-        transactionType: "TRANSFER",
-      },
-    }),
-    Transaction.count({
-      where: {
-        toAddress: walletAddress,
-        transactionType: "TRANSFER",
-      },
-    }),
-    Background.count({ where: { artistAddress: walletAddress } }),
-  ]);
+  const [createdCount, sentCount, receivedCount, mintedCount] =
+    await Promise.all([
+      GiftCard.count({ where: { creatorAddress: walletAddress } }),
+      Transaction.count({
+        where: {
+          fromAddress: walletAddress,
+          transactionType: "TRANSFER",
+        },
+      }),
+      Transaction.count({
+        where: {
+          toAddress: walletAddress,
+          transactionType: "TRANSFER",
+        },
+      }),
+      Background.count({ where: { artistAddress: walletAddress } }),
+    ]);
 
   await user.update({
     totalGiftCardsCreated: createdCount,
@@ -1329,49 +1477,54 @@ app.get("/api/user/:walletAddress", async (req, res) => {
     }
 
     // Get all data in parallel
-    const [createdGiftCards, ownedGiftCards, mintedBackgrounds, sentTransactions, receivedTransactions] =
-      await Promise.all([
-        // Gift cards created by user
-        GiftCard.findAll({
-          where: { creatorAddress: req.params.walletAddress },
-          include: [{ model: Background }],
-        }),
-        // Gift cards currently owned by user
-        GiftCard.findAll({
-          where: { currentOwner: req.params.walletAddress },
-          include: [{ model: Background }],
-        }),
-        // Backgrounds minted by user
-        Background.findAll({
-          where: { artistAddress: req.params.walletAddress },
-        }),
-        // Gift card transfers sent by user
-        Transaction.findAll({
-          where: {
-            fromAddress: req.params.walletAddress,
-            transactionType: "TRANSFER",
+    const [
+      createdGiftCards,
+      ownedGiftCards,
+      mintedBackgrounds,
+      sentTransactions,
+      receivedTransactions,
+    ] = await Promise.all([
+      // Gift cards created by user
+      GiftCard.findAll({
+        where: { creatorAddress: req.params.walletAddress },
+        include: [{ model: Background }],
+      }),
+      // Gift cards currently owned by user
+      GiftCard.findAll({
+        where: { currentOwner: req.params.walletAddress },
+        include: [{ model: Background }],
+      }),
+      // Backgrounds minted by user
+      Background.findAll({
+        where: { artistAddress: req.params.walletAddress },
+      }),
+      // Gift card transfers sent by user
+      Transaction.findAll({
+        where: {
+          fromAddress: req.params.walletAddress,
+          transactionType: "TRANSFER",
+        },
+        include: [
+          {
+            model: GiftCard,
+            include: [{ model: Background }],
           },
-          include: [
-            {
-              model: GiftCard,
-              include: [{ model: Background }],
-            },
-          ],
-        }),
-        // Gift card transfers received by user
-        Transaction.findAll({
-          where: {
-            toAddress: req.params.walletAddress,
-            transactionType: "TRANSFER",
+        ],
+      }),
+      // Gift card transfers received by user
+      Transaction.findAll({
+        where: {
+          toAddress: req.params.walletAddress,
+          transactionType: "TRANSFER",
+        },
+        include: [
+          {
+            model: GiftCard,
+            include: [{ model: Background }],
           },
-          include: [
-            {
-              model: GiftCard,
-              include: [{ model: Background }],
-            },
-          ],
-        }),
-      ]);
+        ],
+      }),
+    ]);
 
     // Calculate statistics
     const stats = {
@@ -1384,14 +1537,14 @@ app.get("/api/user/:walletAddress", async (req, res) => {
 
     // Format transfer history
     const transferHistory = {
-      sent: sentTransactions.map(tx => ({
+      sent: sentTransactions.map((tx) => ({
         transactionId: tx.id,
         giftCardId: tx.giftCardId,
         recipient: tx.toAddress,
         timestamp: tx.createdAt,
         giftCard: tx.GiftCard,
       })),
-      received: receivedTransactions.map(tx => ({
+      received: receivedTransactions.map((tx) => ({
         transactionId: tx.id,
         giftCardId: tx.giftCardId,
         sender: tx.fromAddress,
@@ -1544,7 +1697,10 @@ app.get("/api/users/:walletAddress/activity", async (req, res) => {
   try {
     const activities = await Transaction.findAll({
       where: {
-        [Op.or]: [{ fromAddress: req.params.walletAddress }, { toAddress: req.params.walletAddress }],
+        [Op.or]: [
+          { fromAddress: req.params.walletAddress },
+          { toAddress: req.params.walletAddress },
+        ],
       },
       order: [["createdAt", "DESC"]],
       limit: 20,
@@ -1556,7 +1712,7 @@ app.get("/api/users/:walletAddress/activity", async (req, res) => {
       ],
     });
 
-    const formattedActivities = activities.map(activity => {
+    const formattedActivities = activities.map((activity) => {
       const isOutgoing = activity.fromAddress === req.params.walletAddress;
       return {
         id: activity.id,
@@ -1581,10 +1737,17 @@ app.get("/api/users", async (req, res) => {
     const { limit, offset, page } = getPaginationParams(req);
     const { sortBy = "createdAt", sortOrder = "DESC" } = req.query;
 
-    const validSortFields = ["createdAt", "totalGiftCardsCreated", "totalBackgroundsMinted"];
+    const validSortFields = [
+      "createdAt",
+      "totalGiftCardsCreated",
+      "totalBackgroundsMinted",
+    ];
     const validSortOrders = ["ASC", "DESC"];
 
-    if (!validSortFields.includes(sortBy) || !validSortOrders.includes(sortOrder.toUpperCase())) {
+    if (
+      !validSortFields.includes(sortBy) ||
+      !validSortOrders.includes(sortOrder.toUpperCase())
+    ) {
       return res.status(400).json({
         success: false,
         error: "Invalid sort parameters",
@@ -1676,7 +1839,10 @@ app.get("/api/users/search", async (req, res) => {
 
     const users = await User.findAll({
       where: {
-        [Op.or]: [{ username: { [Op.iLike]: `%${query}%` } }, { walletAddress: { [Op.iLike]: `%${query}%` } }],
+        [Op.or]: [
+          { username: { [Op.iLike]: `%${query}%` } },
+          { walletAddress: { [Op.iLike]: `%${query}%` } },
+        ],
       },
       attributes: {
         exclude: ["email"],
@@ -1789,7 +1955,9 @@ app.post("/api/giftcard/set-secret", async (req, res) => {
     const { giftCardId, secret } = req.body;
 
     // Forward the request to the new route
-    console.log(`Legacy global route for setting secret key called, redirecting to gift-cards API`);
+    console.log(
+      `Legacy global route for setting secret key called, redirecting to gift-cards API`
+    );
 
     // Make an internal request to the correct route
     req.url = `/api/gift-cards/set-secret`;
