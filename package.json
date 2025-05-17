@@ -26,7 +26,7 @@
     "compression": "^1.8.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
-    "ethers": "^6.1.0",
+    "ethers": "^6.14.1",
     "express": "^4.18.3",
     "express-rate-limit": "^7.5.0",
     "hardhat": "^2.23.0",
@@ -40,7 +40,8 @@
     "pg-hstore": "^2.3.4",
     "sequelize": "^6.37.7",
     "supertest": "^7.1.0",
-    "viem": "^1.21.4"
+    "viem": "^1.21.4",
+    "web3": "^4.16.0"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^3.0.0",
