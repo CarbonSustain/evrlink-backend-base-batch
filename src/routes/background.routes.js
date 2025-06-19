@@ -326,7 +326,7 @@ router.post("/mint", verifyToken, upload.single("image"), async (req, res) => {
           ),
           // 2 minute timeout
         ]);
-        const gasfee = receipt.gasPrice;
+        const gasfee = Number((receipt.gasPrice * receipt.gasUsed)) / 1e18;
         const fromaddr = String(receipt.from).toLowerCase();
         const toaddr = String(receipt.to).toLowerCase();
 
