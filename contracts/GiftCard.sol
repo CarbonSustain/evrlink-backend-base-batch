@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/Counters.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
 contract NFTGiftMarketplace is ERC721URIStorage, Ownable {
     using Counters for Counters.Counter;
@@ -20,7 +20,7 @@ contract NFTGiftMarketplace is ERC721URIStorage, Ownable {
         uint128 price;
         string message;
         bytes32 secretHash;
-        uint32 backgroundId;
+        uint32[] backgroundIds;
     }
 
     struct Background {
@@ -38,18 +38,24 @@ contract NFTGiftMarketplace is ERC721URIStorage, Ownable {
     address public climateAddress;
     address public taxAddress;
 
-    // Fixed platform fee in wei (~$1.10 at ETH ~$1800)
-    uint128 public constant PLATFORM_FEE_IN_WEI = 611111111111111;
+    IERC20 public usdcToken;
 
     event BackgroundMinted(uint32 indexed backgroundId, address indexed artist, string imageURI, string category, uint128 price);
-    event GiftCardCreated(uint32 indexed giftCardId, address indexed creator, uint128 price, uint32 backgroundId);
+    event GiftCardCreated(uint32 indexed giftCardId, address indexed creator, uint128 price, uint32[] backgroundIds);
     event GiftCardTransferred(uint32 indexed giftCardId, address indexed from, address indexed to);
     event GiftCardClaimed(uint32 indexed giftCardId, address indexed recipient);
+    event SecretKeySet(uint32 indexed giftCardId, address indexed owner);
 
-    constructor(address _platform, address _climate, address _tax) ERC721("BackgroundNFT", "BGNFT") {
+    constructor(
+        address _platform,
+        address _climate,
+        address _tax,
+        address _usdcToken
+    ) ERC721("BackgroundNFT", "BGNFT") {
         platformAddress = _platform;
         climateAddress = _climate;
         taxAddress = _tax;
+        usdcToken = IERC20(_usdcToken);
     }
 
     function mintBackground(string memory imageURI, string memory category, uint128 priceInWei) external {
@@ -73,69 +79,117 @@ contract NFTGiftMarketplace is ERC721URIStorage, Ownable {
         emit BackgroundMinted(backgroundId, msg.sender, imageURI, category, priceInWei);
     }
 
-    function createGiftCard(uint32 backgroundId, string memory message) external payable {
-        require(ownerOf(backgroundId) != address(0), "Background does not exist");
+    function createGiftCardWithUSDC(
+        uint32[] memory backgroundIds,
+        string memory message,
+        uint128 backgroundTotalPriceUSDC,
+        uint128 taxFeeUSDC,
+        uint128 climateFeeUSDC,
+        uint128 platformFeeUSDC
+    ) external {
+        require(backgroundIds.length > 0, "No backgrounds selected");
 
-        uint128 backgroundPrice = backgrounds[backgroundId].price;
+        uint128 totalUSDC = backgroundTotalPriceUSDC + taxFeeUSDC + climateFeeUSDC + platformFeeUSDC;
 
-        // Hardcoded fee percentages: tax = 4%, climate = 1%
-        uint128 taxFee = (backgroundPrice * 4) / 100;
-        uint128 climateFee = (backgroundPrice * 1) / 100;
+        require(
+            usdcToken.transferFrom(msg.sender, address(this), totalUSDC),
+            "USDC transfer to contract failed"
+        );
 
-        uint128 totalRequired = backgroundPrice + PLATFORM_FEE_IN_WEI + taxFee + climateFee;
-        require(msg.value >= totalRequired, "Insufficient ETH sent");
+        // Pay each artist proportionally
+        for (uint i = 0; i < backgroundIds.length; i++) {
+            uint32 id = backgroundIds[i];
+            require(ownerOf(id) != address(0), "Invalid background ID");
 
-        payable(platformAddress).sendValue(PLATFORM_FEE_IN_WEI);
-        payable(taxAddress).sendValue(taxFee);
-        payable(climateAddress).sendValue(climateFee);
-        payable(backgrounds[backgroundId].artist).sendValue(backgroundPrice);
+            uint128 price = backgrounds[id].price;
+            require(usdcToken.transfer(backgrounds[id].artist, price), "USDC to artist failed");
+        }
 
+        require(usdcToken.transfer(platformAddress, platformFeeUSDC), "USDC to platform failed");
+        require(usdcToken.transfer(taxAddress, taxFeeUSDC), "USDC to tax failed");
+        require(usdcToken.transfer(climateAddress, climateFeeUSDC), "USDC to climate failed");
+
+        _recordGiftCard(backgroundIds, message, totalUSDC);
+    }
+
+    function createGiftCardWithETH(
+        uint32[] memory backgroundIds,
+        uint128[] memory artNftPricesETH, // <-- change from uint32[] to uint128[]
+        string memory message,
+        uint128 backgroundTotalPriceETH,
+        uint128 taxFeeETH,
+        uint128 climateFeeETH,
+        uint128 platformFeeETH
+    ) external payable {
+        require(backgroundIds.length > 0, "No backgrounds selected");
+        require(backgroundIds.length == artNftPricesETH.length, "Mismatched array lengths");
+
+        uint256 totalETH = backgroundTotalPriceETH + taxFeeETH + climateFeeETH + platformFeeETH;
+        require(msg.value >= totalETH, "Insufficient ETH sent");
+
+        // Pay each artist
+        for (uint i = 0; i < backgroundIds.length; i++) {
+            uint32 id = backgroundIds[i];
+            require(ownerOf(id) != address(0), "Invalid background ID");
+
+            uint128 price = artNftPricesETH[i];
+            payable(backgrounds[id].artist).sendValue(price);
+        }
+
+        // Send ETH to fee addresses
+        payable(platformAddress).sendValue(platformFeeETH);
+        payable(taxAddress).sendValue(taxFeeETH);
+        payable(climateAddress).sendValue(climateFeeETH);
+
+        _recordGiftCard(backgroundIds, message, uint128(msg.value));
+    }
+
+
+
+
+    function _recordGiftCard(uint32[] memory backgroundIds, string memory message, uint128 value) internal {
         _giftCardIdCounter.increment();
         uint32 giftCardId = uint32(_giftCardIdCounter.current());
 
         giftCards[giftCardId] = GiftCard({
             creator: msg.sender,
             currentOwner: msg.sender,
-            price: uint128(msg.value),
+            price: value,
             message: message,
             secretHash: 0,
-            backgroundId: backgroundId
+            backgroundIds: backgroundIds
         });
 
-        emit GiftCardCreated(giftCardId, msg.sender, uint128(msg.value), backgroundId);
-    }
-
-    function transferGiftCard(uint32 giftCardId, address recipient) external {
-        GiftCard storage giftCard = giftCards[giftCardId];
-        require(giftCard.currentOwner == msg.sender, "Only the owner can transfer the gift card");
-        require(recipient != address(0), "Invalid recipient address");
-
-        giftCard.currentOwner = recipient;
-
-        emit GiftCardTransferred(giftCardId, msg.sender, recipient);
+        emit GiftCardCreated(giftCardId, msg.sender, value, backgroundIds);
     }
 
     function setSecretKey(uint32 giftCardId, string memory secret) external {
         GiftCard storage giftCard = giftCards[giftCardId];
-        require(giftCard.currentOwner == msg.sender, "Only the owner can set the secret key");
-
+        require(giftCard.currentOwner == msg.sender, "Only owner can set secret");
         giftCard.secretHash = keccak256(abi.encodePacked(secret));
+        emit SecretKeySet(giftCardId, msg.sender);
     }
 
     function claimGiftCard(uint32 giftCardId, string memory secret) external {
         GiftCard storage giftCard = giftCards[giftCardId];
         require(giftCard.secretHash == keccak256(abi.encodePacked(secret)), "Invalid secret");
-
         giftCard.currentOwner = msg.sender;
-
         emit GiftCardClaimed(giftCardId, msg.sender);
     }
 
-    function _burn(uint256 tokenId) internal override(ERC721URIStorage) {
-        super._burn(tokenId);
+    function transferGiftCard(uint32 giftCardId, address recipient) external {
+        GiftCard storage giftCard = giftCards[giftCardId];
+        require(giftCard.currentOwner == msg.sender, "Only owner can transfer");
+        require(recipient != address(0), "Invalid recipient");
+        giftCard.currentOwner = recipient;
+        emit GiftCardTransferred(giftCardId, msg.sender, recipient);
     }
 
     function tokenURI(uint256 tokenId) public view override(ERC721URIStorage) returns (string memory) {
         return super.tokenURI(tokenId);
+    }
+
+    function _burn(uint256 tokenId) internal override(ERC721URIStorage) {
+        super._burn(tokenId);
     }
 }

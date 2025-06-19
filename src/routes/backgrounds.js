@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { upload } = require("../middleware/multer"); // Updated to use S3 multer configuration
 const { verifyToken } = require("../middleware/auth");
+const { Background } = require("../models/ArtNft");
 
 // Create new background
 router.post("/", verifyToken, upload.single("image"), async (req, res) => {

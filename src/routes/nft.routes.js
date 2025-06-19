@@ -43,10 +43,7 @@ router.get('/owned/:address', async (req, res) => {
       const background = await contract.backgrounds(tokenId);
       
       // Get metadata from database
-      const query = `
-        SELECT * FROM backgrounds 
-        WHERE blockchain_id = $1
-      `;
+      const query = `SELECT * FROM art_nft WHERE id = $1`;
       
       const result = await pool.query(query, [tokenId.toString()]);
       const dbBackground = result.rows[0];
@@ -55,12 +52,11 @@ router.get('/owned/:address', async (req, res) => {
         ownedTokens.push({
           id: dbBackground.id,
           tokenId: tokenId.toString(),
-          name: `${dbBackground.category} #${tokenId}`,
+          name: `NFT #${dbBackground.id}`,
           description: `Created by ${dbBackground.artist_address}`,
           imageUrl: dbBackground.image_uri,
-          category: dbBackground.category,
+          categoryId: dbBackground.gift_card_category_id,
           price: dbBackground.price,
-          usageCount: dbBackground.usage_count,
           isMinted: true,
           createdAt: dbBackground.created_at,
           contractAddress: NFT_CONTRACT_ADDRESS,
@@ -89,8 +85,8 @@ router.get('/token/:tokenId/metadata', async (req, res) => {
     
     // Query to get background details
     const query = `
-      SELECT * FROM backgrounds 
-      WHERE blockchain_id = $1
+      SELECT * FROM art_nft 
+      WHERE id = $1
     `;
     
     const result = await pool.query(query, [tokenId]);
@@ -106,14 +102,14 @@ router.get('/token/:tokenId/metadata', async (req, res) => {
     
     // Format metadata according to OpenSea standard
     const metadata = {
-      name: `${background.category} #${background.blockchain_id}`,
+      name: `Background #${background.id}`,
       description: `Created by ${background.artist_address}`,
       image: background.image_uri,
       external_url: `${process.env.FRONTEND_URL}/background/${background.id}`,
       attributes: [
         {
-          trait_type: "Category",
-          value: background.category
+          trait_type: "Category ID",
+          value: background.gift_card_category_id
         },
         {
           trait_type: "Artist",
@@ -148,7 +144,7 @@ router.post('/mint/:backgroundId', verifyToken, async (req, res) => {
     
     // Get background details
     const bgQuery = `
-      SELECT * FROM backgrounds 
+      SELECT * FROM art_nft 
       WHERE id = $1 AND artist_address = $2
     `;
     
@@ -162,14 +158,7 @@ router.post('/mint/:backgroundId', verifyToken, async (req, res) => {
     }
     
     const background = bgResult.rows[0];
-    
-    // Check if already minted
-    if (background.blockchain_id) {
-      return res.status(400).json({
-        success: false,
-        error: 'Background already minted as NFT'
-      });
-    }
+
     
     // Create a signer for the transaction
     const signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
@@ -177,7 +166,7 @@ router.post('/mint/:backgroundId', verifyToken, async (req, res) => {
     
     // Mint the NFT
     const tx = await contractWithSigner.mintBackground(
-      background.category,
+      background.gift_card_category_id,
       background.image_uri,
       background.price,
       address
@@ -193,16 +182,15 @@ router.post('/mint/:backgroundId', verifyToken, async (req, res) => {
       throw new Error('Failed to get token ID from mint transaction');
     }
     
-    // Update the background with blockchain ID
+    // Update the background with transaction hash
     const updateQuery = `
-      UPDATE backgrounds 
-      SET blockchain_id = $1, blockchain_tx_hash = $2
-      WHERE id = $3
+      UPDATE art_nft 
+      SET blockchain_tx_hash = $1
+      WHERE id = $2
       RETURNING *
     `;
     
     const updateResult = await pool.query(updateQuery, [
-      tokenId.toString(),
       receipt.hash,
       backgroundId
     ]);

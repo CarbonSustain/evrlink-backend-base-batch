@@ -1,13 +1,24 @@
 const express = require("express");
 const router = express.Router();
 const GiftCard = require("../models/GiftCard");
-const Background = require("../models/Background");
+const Background = require("../models/ArtNft");
+const GiftCardSecret = require("../models/GiftCardSecret");
+const GiftCardArtNft = require("../models/GiftCardArtNft");
+const BlockchainTransaction = require("../models/BlockchainTransaction");
+const BlockchainTransactionCategory = require("../models/BlockchainTransactionCategory");
+const EvrlinkConstant = require("../models/EvrlinkConstant");
+const BlockchainTransactionGiftCard = require("../models/BlockchaintransactionGiftcard");
 const { verifyToken } = require("../middleware/auth");
 const { hashSecret, verifySecret } = require("../utils/crypto");
 const rateLimit = require("express-rate-limit");
 const { ethers } = require("ethers");
 const { BLOCKCHAIN_ENABLED } = require("../config");
 const { Op } = require("sequelize");
+const { GiftCardSettlement } = require("../models");
+const { User } = require("../models");
+const { set } = require("zod");
+const axios = require("axios"); // (keep if used elsewhere)
+// const Coinbase = require("coinbase").Client; // Add this line
 
 // Rate limiting middleware
 const createLimiter = rateLimit({
@@ -17,21 +28,42 @@ const createLimiter = rateLimit({
 
 // Input validation middleware
 const validateGiftCardInput = (req, res, next) => {
-  const { backgroundId, price, message, giftCardId, recipientAddress } =
-    req.body;
-
+  const {
+    backgroundIds,
+    message,
+    giftCardId,
+    recipientAddress,
+    paymentMethod,
+    artNftPricesUSDC,
+    transferMethod, // new field
+  } = req.body;
   const errors = {};
 
-  // For create route
   if (req.path === "/create") {
-    if (!backgroundId) {
-      errors.backgroundId = "Background ID is required";
+    if (!Array.isArray(backgroundIds) || backgroundIds.length === 0) {
+      errors.backgroundIds = "backgroundIds (array) is required";
     }
-
-    if (!price) {
-      errors.price = "Price is required";
-    } else if (isNaN(parseFloat(price)) || parseFloat(price) <= 0) {
-      errors.price = "Price must be a positive number";
+    if (!paymentMethod || !["eth", "usdc"].includes(paymentMethod)) {
+      errors.paymentMethod = "paymentMethod must be 'eth' or 'usdc'";
+    }
+    if (paymentMethod === "usdc" || paymentMethod === "eth") {
+      if (
+        !Array.isArray(artNftPricesUSDC) ||
+        artNftPricesUSDC.length !== backgroundIds.length ||
+        artNftPricesUSDC.some((v) => isNaN(Number(v)) || Number(v) <= 0)
+      ) {
+        errors.artNftPricesUSDC =
+          "artNftPricesUSDC (array of positive numbers, same length as backgroundIds) is required";
+      }
+    }
+    // Optionally validate transferMethod if present
+    if (
+      transferMethod &&
+      !["setSecretKey", "transfer", "transferByBaseUsername"].includes(
+        transferMethod
+      )
+    ) {
+      errors.transferMethod = "Invalid transferMethod";
     }
   }
 
@@ -64,16 +96,38 @@ router.post(
   createLimiter,
   validateGiftCardInput,
   async (req, res) => {
-    const { backgroundId, price, message } = req.body;
-    const sequelize = GiftCard.sequelize;
+    let {
+      backgroundIds,
+      message,
+      secret,
+      recipientAddress,
+      paymentMethod,
+      artNftPricesUSDC,
+      transferMethod, // new field
+      baseUsername, // for transferByBaseUsername
+    } = req.body;
 
-    // Start a transaction
+    // Only accept the relevant field(s) based on transferMethod
+    if (transferMethod === "setSecretKey") {
+      recipientAddress = undefined;
+      baseUsername = undefined;
+    } else if (transferMethod === "transfer") {
+      secret = undefined;
+      baseUsername = undefined;
+    } else if (transferMethod === "transferByBaseUsername") {
+      secret = undefined;
+      recipientAddress = undefined;
+    } else {
+      // If no transferMethod, allow all fields (legacy/fallback)
+      // Optionally, you could clear all but the first present
+    }
+
+    const sequelize = GiftCard.sequelize;
     const transaction = await sequelize.transaction();
 
     try {
       console.log("Creating gift card with data:", {
-        backgroundId,
-        price,
+        backgroundIds,
         message,
         userWalletAddress: req.user.walletAddress,
       });
@@ -84,46 +138,172 @@ router.post(
         );
       }
 
-      // Check if background exists - within transaction
-      const background = await Background.findByPk(backgroundId, {
+      // Check if backgrounds exist - within transaction
+      const backgrounds = await Background.findAll({
+        where: {
+          id: backgroundIds,
+        },
         transaction,
       });
-      if (!background) {
+      if (!backgrounds || backgrounds.length === 0) {
         await transaction.rollback();
-        console.error(`Background not found with ID: ${backgroundId}`);
+        console.error(`No backgrounds found with IDs: ${backgroundIds}`);
         return res.status(404).json({
           success: false,
-          error: "Background not found",
+          error: "No backgrounds found",
         });
       }
 
-      console.log("Found background:", background.id);
+      console.log(
+        "Found backgrounds:",
+        backgrounds.map((b) => b.id)
+      );
 
+      // Fetch rates from evrlink_constants table (use latest row)
+      const constants = await EvrlinkConstant.findOne({
+        order: [["created_at", "DESC"]],
+        transaction,
+      });
+      const taxRate = constants?.tax_rate;
+      const platformFee = constants?.evrlink_platform_fee;
+      const climateRate = constants?.climate_rate;
+      console.log("artNftPricesUSDC:", artNftPricesUSDC); // Calculate USDC fees
+      // artNftPricesUSDC = artNftPricesUSDC * 1e6; // Convert to smallest unit (6 decimals)
+      const backgroundTotalPriceUSDC = Array.isArray(artNftPricesUSDC)
+        ? artNftPricesUSDC.reduce(
+            (acc, v) => acc + BigInt(Math.floor(Number(v) * 1e6)),
+            BigInt(0)
+          )
+        : BigInt(0);
+      const platformFeeUSDC = BigInt(Math.round(platformFee * 1e6));
+      const taxFeeUSDC =
+        (BigInt(Math.floor(Number(taxRate) * 1e6)) * backgroundTotalPriceUSDC) /
+        BigInt(1e6);
+      const climateFeeUSDC =
+        (BigInt(Math.floor(Number(climateRate) * 1e6)) *
+          backgroundTotalPriceUSDC) /
+        BigInt(1e6);
+      console.log(
+        "Background total price (USDC):",
+        backgroundTotalPriceUSDC.toString()
+      );
+
+      const totalPriceUSDC =
+        backgroundTotalPriceUSDC +
+        taxFeeUSDC +
+        climateFeeUSDC +
+        platformFeeUSDC;
+      console.log("Platform fee (USDC):", platformFeeUSDC.toString());
+      console.log("Tax fee (USDC):", taxFeeUSDC.toString());
+      console.log("Climate fee (USDC):", climateFeeUSDC.toString());
       let transactionHash = null;
       let blockchainError = null;
+      let receipt = null;
+
+      // Helper to convert USDC (6 decimals) to ETH (wei) using Coinbase SDK
+      // async function usdcToEth(usdcAmount) {
+      //   // usdcAmount: string or BigInt, in USDC smallest unit (6 decimals)
+      //   const usdcDecimals = 6;
+      //   const ethDecimals = 18;
+      //   const client = new Coinbase({
+      //     apiKey: process.env.COIN_BASE_API_KEY,
+      //     apiSecret: process.env.COIN_BASE_API_SECRET,
+      //   });
+
+      //   // Get ETH-USD spot price from Coinbase
+      //   const ethSpot = await new Promise((resolve, reject) => {
+      //     client.getSpotPrice(
+      //       { currencyPair: "ETH-USD" },
+      //       function (err, price) {
+      //         if (err) return reject(err);
+      //         resolve(price);
+      //       }
+      //     );
+      //   });
+
+      //   const ethPriceUSD = parseFloat(ethSpot.amount); // ETH price in USD
+
+      //   // 1 USDC = 1 USD, so usdcAmount in USD:
+      //   const amountUSD = Number(usdcAmount) / 10 ** usdcDecimals;
+      //   // Convert USD to ETH
+      //   const amountETH = amountUSD / ethPriceUSD;
+      //   // Convert to wei
+      //   return BigInt(Math.floor(amountETH * 10 ** ethDecimals)).toString();
+      // }
 
       // Handle blockchain transaction if enabled
       if (BLOCKCHAIN_ENABLED && req.app.contract) {
         try {
           console.log("Creating gift card on blockchain...");
-          // Calculate total required ETH as per contract
-          const backgroundPrice = ethers.parseEther(
-            background.price.toString()
-          );
-          const PLATFORM_FEE_IN_WEI = BigInt("611111111111111");
-          const taxFee = (backgroundPrice * 4n) / 100n;
-          const climateFee = backgroundPrice / 100n;
-          const totalRequired =
-            backgroundPrice + PLATFORM_FEE_IN_WEI + taxFee + climateFee;
+          if (paymentMethod === "usdc") {
+            // USDC: call createGiftCardWithUSDC
+            const tx = await req.app.contract.createGiftCardWithUSDC(
+              backgroundIds,
+              message || "",
+              backgroundTotalPriceUSDC.toString(),
+              taxFeeUSDC.toString(),
+              climateFeeUSDC.toString(),
+              platformFeeUSDC.toString()
+            );
+            receipt = await tx.wait();
+            transactionHash = receipt.transactionHash || tx.hash;
+            console.log(
+              "Blockchain transaction (USDC) successful:",
+              transactionHash
+            );
+          } else {
+            // ETH: convert all USDC values to wei directly using the rate 1 USDC = 4e14 wei
+            function usdcToWei(usdcAmount) {
+              // usdcAmount is in USDC smallest unit (6 decimals)
+              return (BigInt(usdcAmount) * BigInt(4e14)) / BigInt(1e6);
+            }
+            const artNftPricesETH = artNftPricesUSDC.map((price) =>
+              usdcToWei(BigInt(Math.floor(Number(price) * 1e6)))
+            );
+            const backgroundTotalPriceWei = usdcToWei(backgroundTotalPriceUSDC);
+            const taxFeeWei = usdcToWei(taxFeeUSDC);
+            const climateFeeWei = usdcToWei(climateFeeUSDC);
+            const platformFeeWei = usdcToWei(platformFeeUSDC);
 
-          const tx = await req.app.contract.createGiftCard(
-            backgroundId,
-            message || "",
-            { value: totalRequired }
-          );
-          const receipt = await tx.wait();
-          transactionHash = receipt.transactionHash || tx.hash;
-          console.log("Blockchain transaction successful:", transactionHash);
+            const totalRequired =
+              backgroundTotalPriceWei +
+              taxFeeWei +
+              climateFeeWei +
+              platformFeeWei;
+
+            console.log(
+              "Background total price (wei):",
+              backgroundTotalPriceWei
+            );
+            console.log("Tax fee (wei):", taxFeeWei);
+            console.log("Climate fee (wei):", climateFeeWei);
+            console.log("Platform fee (wei):", platformFeeWei);
+            console.log("Total required (wei):", totalRequired);
+            console.log("backgroundIds", backgroundIds);
+            console.log(
+              "artNftPricesETH",
+              artNftPricesETH.map((p) => p.toString())
+            );
+
+            const tx = await req.app.contract.createGiftCardWithETH(
+              backgroundIds,
+              artNftPricesETH,
+              message || "",
+              backgroundTotalPriceWei,
+              taxFeeWei,
+              climateFeeWei,
+              platformFeeWei,
+              {
+                value: totalRequired, // send total in wei
+              }
+            );
+            receipt = await tx.wait();
+            transactionHash = receipt.transactionHash || tx.hash;
+            console.log(
+              "Blockchain transaction (ETH) successful:",
+              transactionHash
+            );
+          }
         } catch (error) {
           // Enhanced error handling for blockchain failures
           let debugMsg = "Blockchain error: ";
@@ -217,30 +397,317 @@ router.post(
       const giftCard = await GiftCard.create(
         {
           id: nextId,
-          backgroundId,
-          price: parseFloat(price), // Convert price to float
-          message: message || "", // Handle optional message
-          creatorAddress: req.user.walletAddress,
-          currentOwner: req.user.walletAddress,
-          transactionHash,
-          isClaimable: false,
+          creator_address: req.user.walletAddress,
+          issuer_address: req.user.walletAddress,
+          price: Number(totalPriceUSDC) / 1e6, // Only store price for ETH
+          message: message || "",
+          gift_card_category_id: backgrounds[0].gift_card_category_id || null,
+          created_at: new Date(),
+          updated_at: new Date(),
         },
         { transaction }
       );
+      await GiftCardArtNft.create(
+        {
+          gift_card_id: giftCard.id,
+          art_nft_id: backgrounds[0].id,
+          created_at: new Date(),
+          updated_at: new Date(),
+        },
+        { transaction }
+      );
+      await GiftCardSettlement.create(
+        {
+          gift_card_id: giftCard.id,
+          from_addr: req.user.walletAddress,
+          to_addr: recipientAddress || null,
+          evrlink_fee: Number(platformFeeUSDC) / 1e6, // Only store fee for ETH, not wei, or it will overflow bigintplatformFeeUSDC,
+          tax_fee: Number(taxFeeUSDC) / 1e6,
+          // climate_fee: parseFloat(climateFeeWei.toString()),
+          created_at: new Date(),
+          updated_at: new Date(),
+        },
+        { transaction }
+      );
+
+      // --- BlockchainTransaction for MINT_GIFT_CARD ---
+      const createTxCategory = await BlockchainTransactionCategory.findOne({
+        where: { name: "MINT_GIFT_CARD" },
+        transaction,
+      });
+      if (!createTxCategory) {
+        throw new Error(
+          "BlockchainTransactionCategory 'MINT_GIFT_CARD' not found. Please check your database seed."
+        );
+      }
+
+      const giftcardse = await GiftCardSettlement.findOne({
+        where: { gift_card_id: giftCard.id },
+        transaction,
+      });
+      if (!giftcardse) {
+        throw new Error(
+          "GiftCardSettlement not found for created gift card. Please check your database seed."
+        );
+      }
+      await BlockchainTransaction.create(
+        {
+          tx_hash: transactionHash,
+          blockchain_tx_id: createTxCategory.id,
+          from_addr: req.user.walletAddress,
+          to_addr: null,
+          gift_card_settlement_id: giftcardse.id,
+          gas_fee:
+            receipt &&
+            receipt.gasUsed !== undefined &&
+            (receipt.effectiveGasPrice !== undefined ||
+              receipt.gasPrice !== undefined)
+              ? parseFloat(
+                  ethers.formatEther(
+                    receipt.gasUsed *
+                      (receipt.effectiveGasPrice !== undefined
+                        ? receipt.effectiveGasPrice
+                        : receipt.gasPrice)
+                  )
+                )
+              : 0,
+          tx_timestamp: new Date(),
+          created_at: new Date(),
+          updated_at: new Date(),
+        },
+        { transaction }
+      );
+
+      const bt_id = await BlockchainTransaction.findOne({
+        where: { tx_hash: transactionHash },
+        transaction,
+      });
+      const g_id = await GiftCardSettlement.findOne({
+        where: { gift_card_id: giftCard.id },
+        transaction,
+      });
+
+      await BlockchainTransactionGiftCard.create(
+        {
+          blockchain_transaction_id: bt_id.id,
+          gift_card_settlement_id: g_id.id,
+          created_at: new Date(),
+          updated_at: new Date(),
+        },
+        { transaction }
+      );
+
+      // Workflow: If secret is provided, set secret key on-chain and update DB
+      if (secret) {
+        // Save secret hash in DB
+        const secretHash = hashSecret(secret);
+        await GiftCardSecret.create(
+          {
+            gift_card_id: giftCard.id,
+            secret_hash: secretHash,
+            created_at: new Date(),
+            updated_at: new Date(),
+          },
+          { transaction }
+        );
+        // Record blockchain transaction for setting secret
+        let txCategory = await BlockchainTransactionCategory.findOne({
+          where: { name: "SET_GIFT_CARD_SECRET" },
+        });
+        if (!txCategory) {
+          txCategory = await BlockchainTransactionCategory.create(
+            { name: "SET_GIFT_CARD_SECRET" },
+            { transaction }
+          );
+        }
+        // await BlockchainTransaction.create(
+        //   {
+        //     tx_hash: tx,
+        //     blockchain_tx_Id: txCategory.id,
+        //     from_addr: req.user.walletAddress,
+        //     to_addr: null,
+        //     amount: 0,
+        //     tx_timestamp: new Date(),
+        //     created_at: new Date(),
+        //     updated_at: new Date(),
+        //   },
+        //   { transaction }
+        // );
+
+        // Set secret key on-chain (call set-secret API internally)
+        try {
+          req.params.id = giftCard.id;
+          req.body.secret = secret;
+          await router.handle(req, res, () => {});
+          return;
+        } catch (err) {
+          console.error(
+            "Error calling set-secret API after gift card creation:",
+            err
+          );
+        }
+      }
+
+      // Workflow: If recipientAddress is provided (direct transfer), transfer after creation
+      if (!secret && recipientAddress) {
+        try {
+          req.body.giftCardId = giftCard.id;
+          req.body.recipientAddress = recipientAddress;
+          await router.handle(
+            {
+              ...req,
+              method: "POST",
+              url: "/transfer",
+              body: { giftCardId: giftCard.id, recipientAddress },
+              user: req.user,
+              app: req.app,
+            },
+            res,
+            () => {}
+          );
+          return;
+        } catch (err) {
+          console.error(
+            "Error calling transfer API after gift card creation:",
+            err
+          );
+        }
+      }
 
       // If we get here, commit the transaction
       await transaction.commit();
 
       console.log("Gift card created successfully:", giftCard.id);
 
-      // If there was a blockchain error but database succeeded, include warning
-      if (blockchainError) {
-        return res.status(201).json({
-          success: true,
-          data: giftCard.toJSON(),
-          warning:
-            "Gift card created in database but blockchain operation failed",
-        });
+      // --- Workflow branching based on transferMethod ---
+      // Remove callInternalApi and use direct router.handle as above
+
+      if (transferMethod === "setSecretKey" && secret) {
+        try {
+          req.params.id = giftCard.id;
+          req.body.secret = secret;
+          await router.handle(req, res, () => {});
+          return;
+        } catch (err) {
+          console.error(
+            "Error calling set-secret API after gift card creation:",
+            err
+          );
+        }
+      } else if (transferMethod === "transfer" && recipientAddress) {
+        try {
+          await router.handle(
+            {
+              ...req,
+              method: "POST",
+              url: "/transfer",
+              body: { giftCardId: giftCard.id, recipientAddress },
+              user: req.user,
+              app: req.app,
+            },
+            res,
+            () => {}
+          );
+          return;
+        } catch (err) {
+          console.error(
+            "Error calling transfer API after gift card creation:",
+            err
+          );
+        }
+      } else if (transferMethod === "transferByBaseUsername" && baseUsername) {
+        try {
+          await router.handle(
+            {
+              ...req,
+              method: "POST",
+              url: "/transfer-by-baseusername",
+              body: { giftCardId: giftCard.id, baseUsername },
+              user: req.user,
+              app: req.app,
+            },
+            res,
+            () => {}
+          );
+          return;
+        } catch (err) {
+          console.error(
+            "Error calling transfer-by-baseusername API after gift card creation:",
+            err
+          );
+        }
+      }
+
+      // Fallback to legacy logic if no transferMethod or not matched
+      // If both secret and recipientAddress are provided, set secret then transfer
+      if (secret && recipientAddress) {
+        try {
+          req.params.id = giftCard.id;
+          req.body.secret = secret;
+          await router.handle(req, res, () => {});
+        } catch (err) {
+          console.error(
+            "Error calling set-secret API after gift card creation:",
+            err
+          );
+        }
+        try {
+          await router.handle(
+            {
+              ...req,
+              method: "POST",
+              url: "/transfer",
+              body: { giftCardId: giftCard.id, recipientAddress },
+              user: req.user,
+              app: req.app,
+            },
+            res,
+            () => {}
+          );
+        } catch (err) {
+          console.error(
+            "Error calling transfer API after gift card creation:",
+            err
+          );
+        }
+        return;
+      }
+      // If only secret is provided, set secret
+      if (secret) {
+        try {
+          req.params.id = giftCard.id;
+          req.body.secret = secret;
+          await router.handle(req, res, () => {});
+          return;
+        } catch (err) {
+          console.error(
+            "Error calling set-secret API after gift card creation:",
+            err
+          );
+        }
+      }
+      // If only recipientAddress is provided, transfer
+      if (recipientAddress) {
+        try {
+          await router.handle(
+            {
+              ...req,
+              method: "POST",
+              url: "/transfer",
+              body: { giftCardId: giftCard.id, recipientAddress },
+              user: req.user,
+              app: req.app,
+            },
+            res,
+            () => {}
+          );
+          return;
+        } catch (err) {
+          console.error(
+            "Error calling transfer API after gift card creation:",
+            err
+          );
+        }
       }
 
       res.status(201).json({
@@ -327,19 +794,18 @@ router.post(
         return res.status(404).json({ error: "Gift card not found" });
       }
 
-      if (giftCard.creatorAddress !== req.user.walletAddress) {
-        return res
-          .status(403)
-          .json({ error: "Not authorized to transfer this gift card" });
-      }
-
-      if (giftCard.currentOwner !== req.user.walletAddress) {
+      // Allow transfer if the user is either the creator or the issuer/current owner
+      if (
+        giftCard.creator_address !== req.user.walletAddress &&
+        giftCard.issuer_address !== req.user.walletAddress
+      ) {
         return res
           .status(403)
           .json({ error: "Not authorized to transfer this gift card" });
       }
 
       let transactionHash = null;
+      let receipt = null;
 
       // Handle blockchain transaction if enabled
       if (BLOCKCHAIN_ENABLED) {
@@ -348,7 +814,7 @@ router.post(
             giftCardId,
             recipientAddress
           );
-          const receipt = await tx.wait();
+          receipt = await tx.wait();
           transactionHash = receipt.transactionHash || tx.hash;
         } catch (blockchainError) {
           console.error("Blockchain error:", blockchainError);
@@ -364,9 +830,58 @@ router.post(
 
       // Update gift card with proper error handling
       await giftCard.update({
-        currentOwner: recipientAddress,
-        transactionHash,
-        transferredAt: new Date(),
+        issuer_address: recipientAddress, // update issuer_address to new owner
+        updated_at: new Date(),
+      });
+
+      // Update settlement to_addr and updated_at
+      await GiftCardSettlement.update(
+        { to_addr: recipientAddress, updated_at: new Date() },
+        { where: { gift_card_id: giftCard.id } }
+      );
+
+      // Record blockchain transaction for transfer
+      const txCategory = await BlockchainTransactionCategory.findOne({
+        where: { name: "TRANSFER_GIFT_CARD" },
+      });
+      if (!txCategory) {
+        throw new Error(
+          "BlockchainTransactionCategory 'TRANSFER_GIFT_CARD' not found. Please check your database seed."
+        );
+      }
+
+      const giftcardse = await GiftCardSettlement.findOne({
+        where: { gift_card_id: giftCard.id },
+      });
+      if (!giftcardse) {
+        throw new Error(
+          "GiftCardSettlement not found for transferred gift card. Please check your database seed."
+        );
+      }
+      // Create blockchain transaction record
+      await BlockchainTransaction.create({
+        tx_hash: transactionHash,
+        blockchain_tx_id: txCategory.id,
+        from_addr: req.user.walletAddress,
+        to_addr: recipientAddress,
+        gift_card_settlement_id: giftcardse.id,
+        gas_fee:
+          receipt &&
+          receipt.gasUsed !== undefined &&
+          (receipt.effectiveGasPrice !== undefined ||
+            receipt.gasPrice !== undefined)
+            ? parseFloat(
+                ethers.formatEther(
+                  receipt.gasUsed *
+                    (receipt.effectiveGasPrice !== undefined
+                      ? receipt.effectiveGasPrice
+                      : receipt.gasPrice)
+                )
+              )
+            : 0,
+        tx_timestamp: new Date(),
+        created_at: new Date(),
+        updated_at: new Date(),
       });
 
       res.json({
@@ -399,11 +914,36 @@ router.post("/:id/set-secret", verifyToken, async (req, res) => {
       });
     }
 
-    if (giftCard.currentOwner !== req.user.walletAddress) {
+    // Allow setting secret if the user is either the creator or the current owner
+    if (
+      giftCard.creator_address !== req.user.walletAddress &&
+      giftCard.issuer_address !== req.user.walletAddress
+    ) {
       return res.status(403).json({
         success: false,
-        error: "Unauthorized - only the owner can set the secret key",
+        error:
+          "Unauthorized - only the owner or creator can set the secret key",
       });
+    }
+
+    // --- Set secret on-chain ---
+    let blockchainError = null;
+    let transactionHash = null;
+    let receipt = null;
+    if (BLOCKCHAIN_ENABLED && req.app.contract) {
+      try {
+        const tx = await req.app.contract.setSecretKey(giftCardId, secret);
+        receipt = await tx.wait();
+        transactionHash = receipt.transactionHash || tx.hash;
+        console.log("🔍 Set secret on-chain receipt:", receipt);
+      } catch (error) {
+        blockchainError = error;
+        console.error("Blockchain set-secret error:", error);
+        return res.status(500).json({
+          success: false,
+          error: "Failed to set secret on-chain: " + (error.message || error),
+        });
+      }
     }
 
     // Hash the secret for database storage
@@ -411,8 +951,63 @@ router.post("/:id/set-secret", verifyToken, async (req, res) => {
 
     // Update database
     giftCard.secretHash = secretHash;
-    giftCard.isClaimable = true;
+    await GiftCardSecret.create({
+      gift_card_id: giftCard.id,
+      secret_hash: secretHash,
+      created_at: new Date(),
+      updated_at: new Date(),
+    });
     await giftCard.save();
+
+    // Update settlement updated_at to now (secret set)
+    await GiftCardSettlement.update(
+      { updated_at: new Date() },
+      { where: { gift_card_id: giftCard.id } }
+    );
+
+    // Record blockchain transaction for set-secret
+    const setSecretTxCategory = await BlockchainTransactionCategory.findOne({
+      where: { name: "SET_GIFT_CARD_SECRET" },
+    });
+    if (!setSecretTxCategory) {
+      throw new Error(
+        "BlockchainTransactionCategory 'SET_GIFT_CARD_SECRET' not found. Please check your database seed."
+      );
+    }
+
+    const giftcardse = await GiftCardSettlement.findOne({
+      where: { gift_card_id: giftCard.id },
+    });
+    if (!giftcardse) {
+      throw new Error(
+        "GiftCardSettlement not found for transferred gift card. Please check your database seed."
+      );
+    }
+
+    await BlockchainTransaction.create({
+      tx_hash: transactionHash,
+      blockchain_tx_id: setSecretTxCategory.id,
+      from_addr: req.user.walletAddress,
+      to_addr: null,
+      gift_card_settlement_id: giftcardse.id,
+      gas_fee:
+        receipt &&
+        receipt.gasUsed !== undefined &&
+        (receipt.effectiveGasPrice !== undefined ||
+          receipt.gasPrice !== undefined)
+          ? parseFloat(
+              ethers.formatEther(
+                receipt.gasUsed *
+                  (receipt.effectiveGasPrice !== undefined
+                    ? receipt.effectiveGasPrice
+                    : receipt.gasPrice)
+              )
+            )
+          : 0,
+      tx_timestamp: new Date(),
+      created_at: new Date(),
+      updated_at: new Date(),
+    });
 
     return res.json({
       success: true,
@@ -456,8 +1051,16 @@ router.post("/set-secret", verifyToken, async (req, res) => {
 
     // Update database
     giftCard.secretHash = secretHash;
-    giftCard.isClaimable = true;
+    await GiftCardSecret.create({
+      gift_card_id: giftCard.id,
+      secret_hash: secretHash,
+      created_at: new Date(),
+      updated_at: new Date(),
+    });
+
     await giftCard.save();
+
+    // No blockchain transaction for legacy route
 
     return res.json({
       success: true,
@@ -478,7 +1081,8 @@ router.post("/set-secret", verifyToken, async (req, res) => {
 // Claim gift card
 router.post("/claim", verifyToken, async (req, res) => {
   try {
-    const { giftCardId, secret } = req.body;
+    console.log("Claiming gift card with data:", req.body);
+    const { giftCardId, secret, claimerAddress } = req.body;
 
     // Check if gift card exists
     const giftCard = await GiftCard.findByPk(giftCardId);
@@ -488,20 +1092,16 @@ router.post("/claim", verifyToken, async (req, res) => {
         error: "Gift card not found",
       });
     }
-    if (!giftCard.isClaimable) {
-      return res.status(400).json({
-        success: false,
-        error: "Gift card is not claimable",
-      });
-    }
 
     // Blockchain claim
     let transactionHash = null;
     let blockchainError = null;
+    let receipt = null;
     if (BLOCKCHAIN_ENABLED && req.app.contract) {
       try {
         const tx = await req.app.contract.claimGiftCard(giftCardId, secret);
-        const receipt = await tx.wait();
+        receipt = await tx.wait();
+        console.log("🔍 Blockchain Transaction Receipt:", receipt);
         transactionHash = receipt.transactionHash;
       } catch (error) {
         blockchainError = error;
@@ -509,17 +1109,82 @@ router.post("/claim", verifyToken, async (req, res) => {
     }
 
     // Update database records
-    giftCard.currentOwner = req.user.walletAddress;
-    giftCard.secretHash = null;
-    giftCard.isClaimable = false;
-    await giftCard.save();
+
+    // Update settlement to_addr and updated_at
+    await GiftCardSettlement.update(
+      { to_addr: claimerAddress, updated_at: new Date() },
+      { where: { gift_card_id: giftCard.id } }
+    );
+
+    // Record blockchain transaction
+    const claimTxCategory = await BlockchainTransactionCategory.findOne({
+      where: { name: "CLAIM_GIFT_CARD" },
+    });
+    if (!claimTxCategory) {
+      throw new Error(
+        "BlockchainTransactionCategory 'CLAIM_GIFT_CARD' not found. Please check your database seed."
+      );
+    }
+    const giftcardse = await GiftCardSettlement.findOne({
+      where: { gift_card_id: giftCard.id },
+    });
+    if (!giftcardse) {
+      throw new Error(
+        "GiftCardSettlement not found for transferred gift card. Please check your database seed."
+      );
+    }
+    console.log(
+      "Creating blockchain transaction for claim...",
+      giftCard.issuer_address,
+      claimerAddress
+    );
+    await BlockchainTransaction.create({
+      tx_hash: transactionHash,
+      blockchain_tx_id: claimTxCategory.id,
+      from_addr: giftCard.issuer_address,
+      to_addr: req.user.walletAddress,
+      gift_card_settlement_id: giftcardse.id,
+      gas_fee:
+        receipt &&
+        receipt.gasUsed !== undefined &&
+        (receipt.effectiveGasPrice !== undefined ||
+          receipt.gasPrice !== undefined)
+          ? parseFloat(
+              ethers.formatEther(
+                receipt.gasUsed *
+                  (receipt.effectiveGasPrice !== undefined
+                    ? receipt.effectiveGasPrice
+                    : receipt.gasPrice)
+              )
+            )
+          : 0,
+      tx_timestamp: receipt ? new Date(receipt.timestamp * 1000) : new Date(),
+      created_at: new Date(),
+      updated_at: new Date(),
+    });
+
+    await GiftCard.update(
+      {
+        issuer_address: claimerAddress,
+        updated_at: new Date(),
+      },
+      { where: { id: giftCard.id } }
+    );
+
+    // Ensure User exists for claimer
+
+    let user = await User.findOne({
+      where: { wallet_address: req.user.walletAddress },
+    });
+    if (!user) {
+      await User.create({ wallet_address: req.user.walletAddress });
+    }
 
     return res.json({
       success: true,
       data: {
         id: giftCard.id,
-        currentOwner: giftCard.currentOwner,
-        isClaimable: giftCard.isClaimable,
+        currentOwner: giftCard.current_owner,
         transactionHash,
       },
       blockchainError: blockchainError ? blockchainError.message : undefined,
@@ -533,72 +1198,172 @@ router.post("/claim", verifyToken, async (req, res) => {
   }
 });
 
-// Buy gift card
-router.post("/buy", verifyToken, async (req, res) => {
-  try {
-    const { giftCardId, message, price } = req.body;
+// Add Alchemy Mainnet provider for .cb.id resolution
+const cbidProvider = new ethers.JsonRpcProvider(
+  "https://eth-mainnet.g.alchemy.com/v2/RmUuMM-w_jnGCiXht5C4thJN34MMDH5l"
+);
 
-    // Check if gift card exists
-    const giftCard = await GiftCard.findByPk(giftCardId);
-    if (!giftCard) {
-      return res.status(404).json({
+// POST /resolve-cbid
+router.post("/resolve-cbid", async (req, res) => {
+  const { name } = req.body;
+  if (!name) {
+    return res.status(400).json({ error: "Missing 'name' in request body" });
+  }
+  try {
+    const address = await cbidProvider.resolveName(name); // e.g., "chandan.cb.id"
+    if (address) {
+      return res.json({ name, address });
+    } else {
+      return res
+        .status(404)
+        .json({ error: `${name} is not registered or not resolvable.` });
+    }
+  } catch (err) {
+    console.error("Error resolving ENS name:", err);
+    return res
+      .status(500)
+      .json({ error: "Error resolving ENS name", details: err.message });
+  }
+});
+
+// Transfer gift card by base username
+router.post("/transfer-by-baseusername", async (req, res) => {
+  try {
+    const { giftCardId, baseUsername } = req.body;
+    if (!giftCardId || !baseUsername) {
+      return res.status(400).json({
         success: false,
-        error: "Gift card not found",
+        error: "giftCardId and baseUsername are required.",
       });
     }
 
-    // Handle blockchain purchase if enabled
-    let transactionHash = null;
-    let blockchainPurchased = false;
+    // Resolve the base username to wallet address using the local /resolve-cbid endpoint
+    let resolvedAddress;
+    try {
+      // Call the local resolve-cbid endpoint directly
+      const cbidRes = await new Promise((resolve, reject) => {
+        const mockReq = {
+          ...req,
+          method: "POST",
+          url: "/resolve-cbid",
+          body: { name: baseUsername },
+        };
+        const mockRes = {
+          status: (code) => {
+            mockRes.statusCode = code;
+            return mockRes;
+          },
+          json: (data) => resolve(data),
+          send: (data) => resolve(data),
+          end: () => resolve(),
+          setHeader: () => {},
+        };
+        router.handle(mockReq, mockRes, reject);
+      });
 
-    if (BLOCKCHAIN_ENABLED && req.app.contract) {
-      console.log(
-        `🔹 Buying gift card ${giftCardId} on blockchain for ${req.user.walletAddress}`
-      );
-      try {
-        // Create transaction with payment
-        const tx = await req.app.contract.buyGiftCard(giftCardId, {
-          value: price,
+      if (!cbidRes || !cbidRes.address) {
+        return res.status(404).json({
+          success: false,
+          error: `Could not resolve wallet address for base username: ${baseUsername}`,
         });
-        const receipt = await tx.wait();
-        console.log("🔍 Blockchain Transaction Receipt:", receipt);
-        transactionHash = receipt.transactionHash || tx.hash;
-        blockchainPurchased = true;
-      } catch (blockchainError) {
-        console.error("Blockchain error buying gift card:", blockchainError);
-        // Continue with database update even if blockchain fails
-        console.log("Continuing with database update despite blockchain error");
       }
-    } else {
-      console.log(
-        "Blockchain functionality not available or not enabled, proceeding with database update only"
-      );
-      blockchainPurchased = true; // Allow database update to proceed
+      resolvedAddress = cbidRes.address;
+    } catch (err) {
+      return res.status(500).json({
+        success: false,
+        error: "Failed to resolve base username",
+        details: err.message,
+      });
     }
 
-    // Update database records
-    giftCard.currentOwner = req.user.walletAddress;
-    giftCard.message = message || giftCard.message;
-    giftCard.price = price || giftCard.price;
-    await giftCard.save();
-
-    return res.json({
-      success: true,
-      data: {
-        id: giftCard.id,
-        currentOwner: giftCard.currentOwner,
-        message: giftCard.message,
-        price: giftCard.price,
-        transactionHash,
-      },
-    });
+    // Call the direct transfer API with the resolved address
+    try {
+      const transferRes = await new Promise((resolve, reject) => {
+        const mockReq = {
+          ...req,
+          method: "POST",
+          url: "/transfer",
+          body: { giftCardId, recipientAddress: resolvedAddress },
+        };
+        const mockRes = {
+          status: (code) => {
+            mockRes.statusCode = code;
+            return mockRes;
+          },
+          json: (data) => resolve(data),
+          send: (data) => resolve(data),
+          end: () => resolve(),
+        };
+        router.handle(mockReq, mockRes, reject);
+      });
+      return res.json(transferRes);
+    } catch (err) {
+      return res.status(500).json({
+        success: false,
+        error: "Failed to transfer gift card",
+        details: err.message,
+      });
+    }
   } catch (error) {
-    console.error("Buy gift card error:", error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      error: "Failed to buy gift card",
+      error: "Unexpected error in transfer-by-baseusername",
+      details: error.message,
     });
   }
 });
+
+//         // Create transaction with payment
+//         const tx = await req.app.contract.buyGiftCard(giftCardId, {
+//           value: price,
+//         });
+//         const receipt = await tx.wait();
+//         console.log("🔍 Blockchain Transaction Receipt:", receipt);
+//         transactionHash = receipt.transactionHash || tx.hash;
+//         blockchainPurchased = true;
+//       } catch (blockchainError) {
+//         console.error("Blockchain error buying gift card:", blockchainError);
+//         // Continue with database update even if blockchain fails
+//         console.log("Continuing with database update despite blockchain error");
+//       }
+//     } else {
+//       console.log(
+//         "Blockchain functionality not available or not enabled, proceeding with database update only"
+//       );
+//       blockchainPurchased = true; // Allow database update to proceed
+//     }
+
+//     // Update database records
+//     giftCard.currentOwner = req.user.walletAddress;
+//     giftCard.message = message || giftCard.message;
+//     giftCard.price = price || giftCard.price;
+//     await giftCard.save();
+
+//     return res.json({
+//       success: true,
+//       data: {
+//         id: giftCard.id,
+//         currentOwner: giftCard.currentOwner,
+//         message: giftCard.message,
+//         price: giftCard.price,
+//         transactionHash,
+//       },
+//     });
+//   } catch (error) {
+//     console.error("Buy gift card error:", error);
+//     res.status(500).json({
+//       success: false,
+//       error: "Failed to buy gift card",
+//     });
+//   }
+// });
+//   } catch (error) {
+//     console.error("Buy gift card error:", error);
+//     res.status(500).json({
+//       success: false,
+//       error: "Failed to buy gift card",
+//     });
+//   }
+// });
 
 module.exports = router;

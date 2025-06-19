@@ -1,14 +1,20 @@
-const Background = require('../models/Background');
+const Background = require('../models/ArtNft');
 const GiftCard = require('../models/GiftCard');
 const Transaction = require('../models/Transaction');
 const User = require('../models/User');
+const GiftCardCategory = require('../models/GiftCardCategory'); // Add this import
 
 // Function to create a new background
-exports.createBackground = async (artistAddress, imageURI, category) => {
+exports.createBackground = async (artistAddress, imageURI, categoryName) => {
+  // Look up or create the category and use its ID as FK
+  let category = await GiftCardCategory.findOne({ where: { name: categoryName } });
+  if (!category) {
+    category = await GiftCardCategory.create({ name: categoryName });
+  }
   const background = await Background.create({
     artistAddress,
-    imageURI,
-    category
+    imageUri: imageURI, // Use correct field name
+    giftCardCategoryId: category.id // Use FK
   });
   return background.id;
 };

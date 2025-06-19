@@ -10,12 +10,23 @@ require("dotenv").config();
 const { Sequelize, Op } = require("sequelize");
 const multer = require("multer");
 const jwt = require("jsonwebtoken");
-
-// Import models
-const Background = require("./src/models/Background");
-const GiftCard = require("./src/models/GiftCard");
-const Transaction = require("./src/models/Transaction");
-const User = require("./src/models/User");
+const crypto = require("crypto");
+let tx;
+// Import new models
+const {
+  UserRole,
+  User,
+  GiftCardCategory,
+  GiftCard,
+  GiftCardSecret,
+  ArtNft,
+  GiftCardArtNft,
+  GiftCardSettlement,
+  BlockchainTransactionCategory,
+  BlockchainTransaction,
+} = require("./src/models");
+const EvrlinkConstant = require("./src/models/EvrlinkConstant");
+const Background = require("./src/models/ArtNft");
 
 // Import API routes
 const apiRoutes = require("./src/routes");
@@ -190,6 +201,7 @@ let blockchainEnabled = false;
 
 // Import agent service
 const { createAgent } = require("./src/services/agent.service");
+const { set } = require("zod");
 
 try {
   // Check if required environment variables are set
@@ -330,36 +342,6 @@ app.get("/api/backgrounds/test", (req, res) => {
   });
 });
 
-// Get all backgrounds
-// Commenting out this version since we have a better implementation below with pagination
-// app.get("/api/backgrounds", async (req, res) => {
-//   try {
-//     const backgrounds = await Background.findAll({
-//       order: [['createdAt', 'DESC']]
-//     });
-//
-//     res.json({
-//       success: true,
-//       count: backgrounds.length,
-//       backgrounds: backgrounds.map(bg => ({
-//         id: bg.id,
-//         artistAddress: bg.artistAddress,
-//         imageURI: bg.imageURI,
-//         category: bg.category,
-//         price: bg.price,
-//         usageCount: bg.usageCount,
-//         createdAt: bg.createdAt
-//       }))
-//     });
-//   } catch (error) {
-//     console.error('Error fetching backgrounds:', error);
-//     res.status(500).json({
-//       success: false,
-//       error: error.message || 'Failed to fetch backgrounds'
-//     });
-//   }
-// });
-
 // Setup multer for file uploads
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -384,146 +366,184 @@ const upload = multer({
 const ARTIST_MESSAGE =
   "Background created successfully. Note: While the contract shows the server wallet as the minter for technical reasons, the database correctly attributes you as the artist.";
 
-// Direct background creation endpoint
-app.post("/api/backgrounds", upload.single("image"), async (req, res) => {
+// Direct Art NFT creation endpoint (replaces background creation)
+app.post("/api/artnfts", upload.single("image"), async (req, res) => {
   try {
-    const { category, price } = req.body;
+    const { priceUsdc, artistAddress, giftCardId, category } = req.body;
     const imageFile = req.file;
 
     if (!imageFile) {
       return res.status(400).json({ error: "Image file is required" });
     }
-    if (!category || !price) {
-      return res.status(400).json({ error: "Category and price are required" });
+    if (!priceUsdc || isNaN(priceUsdc) || Number(priceUsdc) <= 0) {
+      return res
+        .status(400)
+        .json({ error: "Price (USDC) must be a positive number" });
     }
-    if (isNaN(price) || Number(price) <= 0) {
-      return res.status(400).json({ error: "Price must be a positive number" });
+    if (!artistAddress) {
+      return res.status(400).json({ error: "Artist address is required" });
+    }
+    if (!giftCardId) {
+      return res
+        .status(400)
+        .json({ error: "Gift Card ID is required for association" });
     }
 
     // Construct image URL (adjust as per your storage setup)
     const imageUrl = `https://${process.env.S3_BUCKET_NAME}.s3.us-west-2.amazonaws.com/${req.fileName}`;
 
-    // Mint on blockchain with new contract logic
-    let tx, receipt, event, backgroundId;
+    // Convert USDC to ETH using Coinbase API (or similar)
+    let ethAmount;
+    try {
+      const response = await fetch(
+        "https://api.coinbase.com/v2/exchange-rates?currency=USDC"
+      );
+      const data = await response.json();
+      const ethRate = data.data.rates.ETH;
+      ethAmount = (Number(priceUsdc) * 1) / Number(ethRate);
+    } catch (err) {
+      return res.status(500).json({ error: "Failed to fetch USDC/ETH rate" });
+    }
+
+    // Mint Art NFT on blockchain (calls mintBackground in contract)
+    let receipt, event, artNftId;
     try {
       tx = await contract.mintBackground(
         imageUrl,
-        category,
-        ethers.parseEther(price.toString())
+        category || "",
+        ethers.parseEther(ethAmount.toString())
       );
+      console.log("IMAGE URL:", imageUrl);
       receipt = await tx.wait();
-
-      // Extract backgroundId from event logs (as before)
-      event = receipt.logs.find((log) => {
-        try {
-          return log.fragment && log.fragment.name === "BackgroundMinted";
-        } catch (err) {
-          console.log("Error checking log fragment:", err);
-          return false;
-        }
-      });
-
+      event = receipt.logs.find(
+        (log) => log.fragment && log.fragment.name === "BackgroundMinted"
+      );
       if (!event) {
         return res.status(500).json({
           success: false,
           error: "BackgroundMinted event not found in transaction receipt.",
         });
       }
-      backgroundId = event.args.backgroundId.toString();
+      artNftId = event.args.backgroundId.toString();
     } catch (error) {
-      console.error("Error minting background on-chain:", error);
-      return res
-        .status(500)
-        .json({ error: "Failed to mint background on-chain" });
+      console.error("Error minting Art NFT on-chain:", error);
+      return res.status(500).json({ error: "Failed to mint Art NFT on-chain" });
     }
 
-    // Only create DB record if on-chain mint succeeded
-    const localBackground = await Background.create({
-      id: backgroundId, // Use blockchain ID
-      artistAddress: req.body.artistAddress || null,
-      imageURI: imageUrl,
-      category,
-      price,
-      usageCount: 0,
-      blockchainId: backgroundId,
-      blockchainTxHash: tx.hash,
+    // Create Art NFT in DB
+    // Look up or create the category and use its ID as FK
+    let giftCardCategoryId = null;
+    if (category) {
+      let cat = await GiftCardCategory.findOne({ where: { name: category } });
+      if (!cat) {
+        cat = await GiftCardCategory.create({
+          name: category,
+          created_at: new Date(),
+          updated_at: new Date(),
+        });
+      }
+      giftCardCategoryId = cat.id;
+    }
+    console.log("Gift Card Category ID:");
+    const artNft = await ArtNft.create({
+      id: artNftId,
+      artist_address: artistAddress,
+      image_uri: imageUrl,
+      price: priceUsdc,
+      gift_card_category_id: giftCardCategoryId,
+      created_at: new Date(),
+      updated_at: new Date(),
     });
+    console.log("Art NFT created in DB:", artNft);
+    // Record blockchain transaction
+    let txCategory = await BlockchainTransactionCategory.findOne({
+      where: { name: "MINT_ART_NFT" },
+    });
+    console.log("Transaction Category:", txCategory);
+    if (!txCategory) {
+      console.log("Creating new transaction category for MINT_ART_NFT");
+      txCategory = await BlockchainTransactionCategory.create({
+        name: "MINT_ART_NFT",
+      });
+    }
+    console.log("Transaction Category ID:", txCategory.id);
+    await BlockchainTransaction.create({
+      tx_hash: tx.hash,
+      blockchain_tx_id: txCategory.id,
+      from_addr: wallet.address,
+      to_addr: artistAddress,
+      tx_timestamp: new Date(),
+      created_at: new Date(),
+      updated_at: new Date(),
+    });
+    console.log("Blockchain transaction recorded successfully");
 
     res.status(201).json({
       success: true,
-      background: {
-        id: localBackground.id,
-        artistAddress: localBackground.artistAddress,
-        imageURI: localBackground.imageURI,
-        category: localBackground.category,
-        price: localBackground.price,
-        blockchainTxHash: localBackground.blockchainTxHash,
-        blockchainId: localBackground.blockchainId,
-        transactionHash: localBackground.blockchainTxHash,
-        basescanUrl: localBackground.blockchainTxHash
-          ? `https://sepolia.basescan.org/tx/${localBackground.blockchainTxHash}`
-          : null,
-      },
-    });
-  } catch (error) {
-    console.error("Error creating background:", error);
-    res.status(500).json({ error: "Failed to create background" });
-  }
-});
-
-// Mint Background
-app.post("/api/background/mint", async (req, res) => {
-  try {
-    const { imageURI, category, price } = req.body;
-    if (!imageURI || !category || !price) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
-    if (isNaN(price) || Number(price) <= 0) {
-      return res.status(400).json({ error: "Invalid price" });
-    }
-
-    console.log("🔹 Minting Background:", { imageURI, category, price });
-    const tx = await contract.mintBackground(
-      imageURI,
-      category,
-      ethers.parseEther(price.toString())
-    );
-    const receipt = await tx.wait();
-    console.log("🔍 Transaction Receipt:", receipt);
-
-    const event = receipt.logs.find(
-      (log) => log.fragment && log.fragment.name === "BackgroundMinted"
-    );
-    if (!event) {
-      return res.status(500).json({
-        success: false,
-        error: "BackgroundMinted event not found in transaction receipt.",
-      });
-    }
-    const backgroundId = event.args.backgroundId.toString();
-
-    // Save to database using the blockchain ID
-    const background = await Background.create({
-      id: backgroundId, // Use blockchain ID
-      artistAddress: wallet.address,
-      imageURI,
-      category,
-      price,
-    });
-
-    console.log(`✅ Background Minted and Saved to DB - ID: ${backgroundId}`);
-    await updateUserStats(wallet.address);
-    res.json({
-      success: true,
+      artNft,
       transactionHash: tx.hash,
-      basescanUrl: `https://sepolia.basescan.org/tx/${transactionHash}`,
-      giftCardId,
-      giftCard,
+      message:
+        "Art NFT created on-chain and associated with Gift Card successfully.",
     });
   } catch (error) {
-    handleError(error, res);
+    console.error("Error creating Art NFT:", error);
+    res.status(500).json({ error: "Failed to create Art NFT" });
   }
 });
+
+// // Mint Background
+// app.post("/api/background/mint", async (req, res) => {
+//   try {
+//     const { imageURI, category, price } = req.body;
+//     if (!imageURI || !category || !price) {
+//       return res.status(400).json({ error: "Missing required fields" });
+//     }
+//     if (isNaN(price) || Number(price) <= 0) {
+//       return res.status(400).json({ error: "Invalid price" });
+//     }
+
+//     console.log("🔹 Minting Background:", { imageURI, category, price });
+//     const tx = await contract.mintBackground(
+//       imageURI,
+//       category,
+//       ethers.parseEther(price.toString())
+//     );
+//     const receipt = await tx.wait();
+//     console.log("🔍 Transaction Receipt:", receipt);
+
+//     const event = receipt.logs.find(
+//       (log) => log.fragment && log.fragment.name === "BackgroundMinted"
+//     );
+//     if (!event) {
+//       return res.status(500).json({
+//         success: false,
+//         error: "BackgroundMinted event not found in transaction receipt.",
+//       });
+//     }
+//     const backgroundId = event.args.backgroundId.toString();
+
+//     // Save to database using the blockchain ID
+//     const background = await Background.create({
+//       id: backgroundId, // Use blockchain ID
+//       artistAddress: wallet.address,
+//       imageURI,
+//       category,
+//       price,
+//     });
+
+//     console.log(`✅ Background Minted and Saved to DB - ID: ${backgroundId}`);
+//     await updateUserStats(wallet.address);
+//     res.json({
+//       success: true,
+//       transactionHash: tx.hash,
+//       basescanUrl: `https://sepolia.basescan.org/tx/${transactionHash}`,
+//       giftCardId,
+//       giftCard,
+//     });
+//   } catch (error) {
+//     handleError(error, res);
+//   }
+// });
 
 // Calculate required ETH for minting a gift card
 app.post("/api/giftcard/price", async (req, res) => {
@@ -580,38 +600,65 @@ function getPaginationParams(req) {
 
 // Get All Backgrounds with Pagination
 // Commenting out as this is now handled by background.routes.js
-// app.get("/api/backgrounds", async (req, res) => {
-//   try {
-//     const { limit, offset, page } = getPaginationParams(req);
-//     const { category } = req.query;
-//
-//     const whereClause = category ? { category } : {};
-//
-//     const { count, rows: backgrounds } = await Background.findAndCountAll({
-//       where: whereClause,
-//       limit,
-//       offset,
-//       order: [['createdAt', 'DESC']]
-//     });
-//
-//     const totalPages = Math.ceil(count / limit);
-//
-//     res.json({
-//       success: true,
-//       backgrounds,
-//       pagination: {
-//         currentPage: page,
-//         totalPages,
-//         totalItems: count,
-//         itemsPerPage: limit,
-//         hasNextPage: page < totalPages,
-//         hasPrevPage: page > 1
-//       }
-//     });
-//   } catch (error) {
-//     handleError(error, res);
-//   }
-// });
+app.get("/api/backgrounds", async (req, res) => {
+  try {
+    const { limit, offset, page } = getPaginationParams(req);
+    const { category } = req.query;
+
+    // Use the correct alias "category" as defined in ArtNft.belongsTo
+    let whereClause = {};
+    let include = [];
+    if (category) {
+      include.push({
+        model: GiftCardCategory,
+        as: "category",
+        where: { name: category },
+        required: true,
+        attributes: ["id", "name"],
+      });
+    } else {
+      include.push({
+        model: GiftCardCategory,
+        as: "category",
+        attributes: ["id", "name"],
+      });
+    }
+
+    const { count, rows: backgrounds } = await ArtNft.findAndCountAll({
+      where: whereClause,
+      include,
+      limit,
+      offset,
+      order: [["created_at", "DESC"]],
+      attributes: [
+        "id",
+        "artist_address",
+        "image_uri",
+        "price",
+        "gift_card_category_id",
+        "created_at",
+        "updated_at",
+      ],
+    });
+
+    const totalPages = Math.ceil(count / limit);
+
+    res.json({
+      success: true,
+      backgrounds,
+      pagination: {
+        currentPage: page,
+        totalPages,
+        totalItems: count,
+        itemsPerPage: limit,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
+      },
+    });
+  } catch (error) {
+    handleError(error, res);
+  }
+});
 
 // Get Background by ID
 app.get("/api/background/:id", async (req, res) => {
@@ -634,10 +681,10 @@ app.post("/api/auth/email-wallet", async (req, res) => {
 
   try {
     const updateData = {};
-    if (walletAddress) updateData.walletAddress = walletAddress;
+    if (walletAddress) updateData.wallet_address = walletAddress;
     if (email) updateData.email = email;
-    if (user_name) updateData.user_name = user_name;
-    updateData.role_id = role_id; // Ensure role_id is always set
+    if (user_name) updateData.username = user_name;
+    updateData.role_id = role_id;
 
     // Perform the upsert
     const [user, created] = await User.upsert(
@@ -646,7 +693,11 @@ app.post("/api/auth/email-wallet", async (req, res) => {
       },
       {
         where: {
-          [Sequelize.Op.or]: [{ walletAddress }, { email }, { user_name }],
+          [Sequelize.Op.or]: [
+            { wallet_address: walletAddress },
+            { email },
+            { username: user_name },
+          ],
         },
         returning: true,
       }
@@ -953,22 +1004,38 @@ app.post(
   ["/api/giftcard/create", "/api/gift-cards/create"],
   async (req, res) => {
     try {
-      const { backgroundId, price, message } = req.body;
-      if (!backgroundId || !price) {
+      const {
+        backgroundId,
+        price,
+        message,
+        creatorAddress,
+        artNftId,
+        secret,
+        recipientAddress,
+      } = req.body;
+      if (!backgroundId || !price || !creatorAddress) {
         return res.status(400).json({
           success: false,
           error:
-            "Missing required fields: backgroundId and price are required.",
+            "Missing required fields: backgroundId, price, and creatorAddress are required.",
         });
       }
 
       // First verify the background exists in database
-      const background = await Background.findByPk(backgroundId);
+      const background = await ArtNft.findByPk(backgroundId);
       if (!background) {
         return res.status(404).json({
           success: false,
-          error: "Background not found with the given ID.",
+          error: "Background (ArtNft) not found with the given ID.",
         });
+      }
+
+      // Ensure user exists for creatorAddress
+      let user = await User.findOne({
+        where: { walletAddress: creatorAddress },
+      });
+      if (!user) {
+        user = await User.create({ walletAddress: creatorAddress });
       }
 
       // Require blockchain to be enabled for gift card creation
@@ -983,119 +1050,197 @@ app.post(
       let giftCardId;
       let transactionHash;
 
-      // Calculate total required ETH as per contract logic
-      const backgroundPrice = ethers.parseEther(price.toString());
+      // Fetch rates from evrlink_constants table (use latest row)
+      const constants = await EvrlinkConstant.findOne({
+        order: [["created_at", "DESC"]],
+      });
+      const taxRate = constants?.tax_rate;
+      const platformRate = constants?.evrlink_platform_rate;
+      const climateRate = constants?.climate_rate;
+
+      // Calculate fees in wei (as integers) to avoid decimal issues
+      const backgroundPriceWei = ethers.parseEther(price.toString());
       const PLATFORM_FEE_IN_WEI = BigInt("611111111111111");
-      const taxFee = (backgroundPrice * 4n) / 100n;
-      const climateFee = backgroundPrice / 100n;
+      const platformFeeWei = backgroundPriceWei * platformRate;
+      const taxFeeWei = backgroundPriceWei * taxRate;
+      const climateFeeWei = backgroundPriceWei * climateRate;
+
+      // Round all fee values to BigInt (wei)
+      const platformFee = PLATFORM_FEE_IN_WEI;
+      const taxFee = BigInt(taxFeeWei.toFixed(0));
+      const climateFee = BigInt(climateFeeWei.toFixed(0));
+
       const totalRequired =
-        backgroundPrice + PLATFORM_FEE_IN_WEI + taxFee + climateFee;
+        backgroundPriceWei + platformFee + taxFee + climateFee;
 
       // Create Gift Card on blockchain
-      console.log("🔹 Creating Gift Card on blockchain:", {
-        backgroundId,
-        price,
-        message,
-      });
       let receipt;
       try {
-        const tx = await contract.createGiftCard(backgroundId, message, {
+        const tx = await contract.createGiftCard(backgroundId, message || "", {
           value: totalRequired,
         });
         receipt = await tx.wait();
-
         const event = receipt.logs.find(
           (log) => log.fragment && log.fragment.name === "GiftCardCreated"
         );
         if (!event) {
-          const errMsg =
-            "GiftCardCreated event not found in transaction receipt. Possible ABI mismatch or contract did not emit event.";
-          console.error(errMsg);
-          throw new Error(errMsg);
+          throw new Error(
+            "GiftCardCreated event not found in transaction receipt. Possible ABI mismatch or contract did not emit event."
+          );
         }
         giftCardId = event.args.giftCardId.toString();
         transactionHash = receipt.hash;
       } catch (error) {
-        // Enhanced error handling for blockchain failures
-        let debugMsg = "Blockchain error: ";
-        if (
-          error.code === "INSUFFICIENT_FUNDS" ||
-          (error.reason && error.reason.includes("insufficient funds"))
-        ) {
-          debugMsg +=
-            "Insufficient ETH sent. Please ensure the totalRequired amount is sent.";
-        } else if (
-          error.code === "CALL_EXCEPTION" ||
-          (error.reason && error.reason.includes("revert"))
-        ) {
-          debugMsg +=
-            "Smart contract reverted. Check if backgroundId exists and all require() conditions are met.";
-        } else if (
-          error.code === "UNPREDICTABLE_GAS_LIMIT" ||
-          (error.message && error.message.includes("out of gas"))
-        ) {
-          debugMsg +=
-            "Transaction ran out of gas. Try increasing the gas limit.";
-        } else if (
-          error.code === "NETWORK_ERROR" ||
-          (error.message && error.message.includes("network"))
-        ) {
-          debugMsg +=
-            "Network/provider error. Check your RPC provider (e.g., Alchemy/Infura) and network status.";
-        } else if (
-          error.code === "INVALID_ARGUMENT" ||
-          (error.message && error.message.includes("invalid argument"))
-        ) {
-          debugMsg +=
-            "Invalid argument sent to contract. Check contract ABI and input types.";
-        } else if (
-          error.code === "NONCE_EXPIRED" ||
-          (error.message && error.message.includes("nonce"))
-        ) {
-          debugMsg += "Nonce issue. Try resetting the backend wallet nonce.";
-        } else if (
-          error.code === "ACTION_REJECTED" ||
-          (error.message && error.message.includes("rejected"))
-        ) {
-          debugMsg += "Transaction was rejected by the wallet or network.";
-        } else if (
-          error.code === "SERVER_ERROR" ||
-          (error.message && error.message.includes("server error"))
-        ) {
-          debugMsg += "Server error from RPC provider.";
-        } else if (error.message && error.message.includes("event not found")) {
-          debugMsg +=
-            "Event not found in transaction receipt. Check contract ABI and event emission.";
-        } else if (error.message && error.message.includes("private key")) {
-          debugMsg +=
-            "Wallet/private key error. Check backend wallet configuration and funding.";
-        } else {
-          debugMsg += error.message || "Unknown blockchain error.";
-        }
-        console.error(debugMsg, error);
-        return res.status(500).json({
-          success: false,
-          error: debugMsg,
-          details: error.stack || error,
+        return handleError(error, res);
+      }
+
+      // Create BlockchainTransactionCategory if not exists
+      let txCategory = await BlockchainTransactionCategory.findOne({
+        where: { name: "MINT_GIFT_CARD" },
+      });
+      if (!txCategory) {
+        txCategory = await BlockchainTransactionCategory.create({
+          name: "MINT_GIFT_CARD",
+        });
+      }
+      // Record blockchain transaction
+      await BlockchainTransaction.create({
+        tx_hash: transactionHash,
+        blockchain_tx_id: txCategory.id,
+        from_addr: creatorAddress,
+        to_addr: null,
+        tx_timestamp: new Date(),
+      });
+
+      // Create GiftCard record
+      // GiftCard creation: use correct schema field names
+      const giftCard = await GiftCard.create({
+        id: giftCardId,
+        creator_address: creatorAddress,
+        issuer_address: wallet.address,
+        price: totalRequired.toString(),
+        message,
+        gift_card_category_id: null, // Set if you have category logic
+        created_at: new Date(),
+        updated_at: new Date(),
+      });
+
+      // Create GiftCardSecret if secret provided
+      if (secret) {
+        // Hash the secret (simple SHA256 for example)
+        const secretHash = ethers.keccak256(ethers.toUtf8Bytes(secret));
+        await GiftCardSecret.create({
+          gift_card_id: giftCardId,
+          secret_hash: secretHash,
+          created_at: new Date(),
+          updated_at: new Date(),
         });
       }
 
-      // Only save to DB if blockchain succeeded
-      const giftCard = await GiftCard.create({
-        id: giftCardId,
-        backgroundId,
-        price: totalRequired.toString(), // Store the actual ETH collected
-        message,
-        isClaimable: true,
-        creatorAddress,
-        currentOwner: creatorAddress,
-        transactionHash,
+      // Create GiftCardSettlement (example: record tax/fees)
+      await GiftCardSettlement.create({
+        gift_card_id: giftCardId,
+        from_addr: creatorAddress,
+        to_addr: wallet.address,
+        tax_fee: Number(taxFee) / 1e18,
+        tax_rate: taxRate,
+        evrlink_fee: Number(platformFee) / 1e18,
+        evrlink_rate: platformRate,
+        created_at: new Date(),
+        updated_at: new Date(),
       });
 
-      // Increment background usage count
-      await background.increment("usageCount");
-      await background.save();
+      // Create GiftCardArtNft association if artNftId provided
+      if (artNftId) {
+        await GiftCardArtNft.create({
+          gift_card_id: giftCardId,
+          art_nft_id: artNftId,
+          created_at: new Date(),
+          updated_at: new Date(),
+        });
+      }
 
+      // After creating the gift card, handle workflow based on input:
+      // 1. If secret is provided, call set-secret API as the creator (owner).
+      // 2. If recipientAddress is provided, call transfer API as the creator (owner).
+      // 3. If both are provided, call set-secret first, then transfer.
+
+      async function callInternalApi(path, body, userWallet) {
+        return new Promise((resolve, reject) => {
+          const mockReq = {
+            ...req,
+            method: "POST",
+            url: path,
+            params: { id: giftCardId },
+            body,
+            user: { walletAddress: userWallet },
+            app: req.app,
+          };
+          const mockRes = {
+            status: (code) => {
+              mockRes.statusCode = code;
+              return mockRes;
+            },
+            json: (data) => resolve(data),
+            send: (data) => resolve(data),
+            end: () => resolve(),
+          };
+          app._router.handle(mockReq, mockRes, reject);
+        });
+      }
+
+      // If both secret and recipientAddress are provided, set secret then transfer
+      if (secret && recipientAddress) {
+        await callInternalApi(
+          `/api/gift-cards/${giftCardId}/set-secret`,
+          { secret, ownerAddress: creatorAddress },
+          creatorAddress
+        );
+        await callInternalApi(
+          `/api/giftcard/transfer`,
+          { giftCardId, recipient: recipientAddress },
+          creatorAddress
+        );
+        return res.json({
+          success: true,
+          message:
+            "Gift card created, secret set, and transferred to recipient.",
+          giftCardId,
+          transactionHash,
+        });
+      }
+
+      // If only secret is provided, set secret
+      if (secret) {
+        await callInternalApi(
+          `/api/gift-cards/${giftCardId}/set-secret`,
+          { secret, ownerAddress: creatorAddress },
+          creatorAddress
+        );
+        return res.json({
+          success: true,
+          message: "Gift card created and secret set.",
+          giftCardId,
+          transactionHash,
+        });
+      }
+
+      // If only recipientAddress is provided, transfer
+      if (recipientAddress) {
+        await callInternalApi(
+          `/api/giftcard/transfer`,
+          { giftCardId, recipient: recipientAddress },
+          creatorAddress
+        );
+        return res.json({
+          success: true,
+          message: "Gift card created and transferred to recipient.",
+          giftCardId,
+          transactionHash,
+        });
+      }
+
+      // Default: just return the created gift card
       res.json({
         success: true,
         transactionHash,
@@ -1104,7 +1249,6 @@ app.post(
         giftCard,
       });
     } catch (error) {
-      console.error("Gift card creation error:", error);
       handleError(error, res);
     }
   }
@@ -1117,9 +1261,6 @@ app.get("/api/giftcards", async (req, res) => {
     const { status, minPrice, maxPrice } = req.query;
 
     const whereClause = {};
-    if (status) {
-      whereClause.isClaimable = status === "available";
-    }
     if (minPrice) {
       whereClause.price = {
         ...whereClause.price,
@@ -1135,7 +1276,7 @@ app.get("/api/giftcards", async (req, res) => {
 
     const { count, rows: giftCards } = await GiftCard.findAndCountAll({
       where: whereClause,
-      include: [{ model: Background }],
+      include: [{ model: ArtNft }],
       limit,
       offset,
       order: [["createdAt", "DESC"]],
@@ -1164,7 +1305,7 @@ app.get("/api/giftcards", async (req, res) => {
 app.get("/api/giftcard/:id", async (req, res) => {
   try {
     const giftCard = await GiftCard.findByPk(req.params.id, {
-      include: [{ model: Background }],
+      include: [{ model: ArtNft }],
     });
     if (!giftCard) {
       return res.status(404).json({
@@ -1183,7 +1324,7 @@ app.get("/api/giftcards/owner/:address", async (req, res) => {
   try {
     const giftCards = await GiftCard.findAll({
       where: { currentOwner: req.params.address },
-      include: [{ model: Background }],
+      include: [{ model: ArtNft }],
     });
     res.json({ success: true, giftCards });
   } catch (error) {
@@ -1195,8 +1336,8 @@ app.get("/api/giftcards/owner/:address", async (req, res) => {
 app.get("/api/giftcards/creator/:address", async (req, res) => {
   try {
     const giftCards = await GiftCard.findAll({
-      where: { creatorAddress: req.params.address },
-      include: [{ model: Background }],
+      where: { creator_address: req.params.address },
+      include: [{ model: ArtNft }],
     });
     res.json({ success: true, giftCards });
   } catch (error) {
@@ -1216,94 +1357,169 @@ app.post("/api/giftcard/transfer", async (req, res) => {
       });
     }
 
-    // Call the smart contract to transfer the gift card on-chain
-    const tx = await contract.transferGiftCard(giftCardId, recipient);
-    const receipt = await tx.wait();
+    // 1. On-chain transfer
+    let receipt, transactionHash;
+    try {
+      tx = await contract.transferGiftCard(giftCardId, recipient);
+      receipt = await tx.wait();
+      transactionHash = receipt.transactionHash || tx.hash;
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        error:
+          "Failed to transfer gift card on-chain: " + (error.message || error),
+      });
+    }
 
-    // Find the GiftCardTransferred event in the logs (optional, if your contract emits it)
+    // 2. Find GiftCardTransferred event (optional)
     const event = receipt.logs.find(
       (log) => log.fragment && log.fragment.name === "GiftCardTransferred"
     );
     if (!event) {
-      // Optionally warn, but still proceed if the transaction succeeded
       console.warn(
         "GiftCardTransferred event not found in transaction receipt"
       );
     }
 
-    // Update database only after successful on-chain transfer
+    // 3. Update DB after on-chain success
+    // a. Update GiftCard owner
     const giftCard = await GiftCard.findByPk(giftCardId);
-    if (giftCard) {
-      await giftCard.update({ currentOwner: recipient });
+    if (!giftCard) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Gift card not found" });
+    }
+    const previousOwner = giftCard.issuer_address;
+    await giftCard.update({
+      issuerAddress: recipient,
+      updated_at: new Date(),
+    });
 
-      // Record transaction
-      await Transaction.create({
-        giftCardId,
-        fromAddress: wallet.address,
-        toAddress: recipient,
-        transactionType: "TRANSFER",
-        amount: 0,
-        transactionHash: tx.hash,
-      });
+    // b. Ensure recipient User exists
+    let user = await User.findOne({ where: { wallet_address: recipient } });
+    if (!user) {
+      user = await User.create({ wallet_address: recipient });
     }
 
-    await Promise.all([
-      updateUserStats(wallet.address),
-      updateUserStats(recipient),
-    ]);
+    // d. Record BlockchainTransactionCategory and BlockchainTransaction
+    const txCategory = await BlockchainTransactionCategory.findOne({
+      where: { name: "TRANSFER_GIFT_CARD" },
+    });
+    if (!txCategory) {
+      throw new Error(
+        "BlockchainTransactionCategory 'TRANSFER_GIFT_CARD' not found. Please check your database seed."
+      );
+    }
+
+    const giftcardse = await GiftCardSettlement.findOne({
+      where: { gift_card_id: giftCard.id },
+    });
+    if (!giftcardse) {
+      throw new Error(
+        "GiftCardSettlement not found for transferred gift card. Please check your database seed."
+      );
+    }
+    const recipientAddress = recipient.toLowerCase();
+
+    await giftCard.update({
+      issuer_address: recipientAddress, // update issuer_address to new owner
+      updated_at: new Date(),
+    });
+
+    await BlockchainTransaction.create({
+      tx_hash: transactionHash,
+      blockchain_tx_id: txCategory.id,
+      from_addr: previousOwner, // previous owner
+      to_addr: recipientAddress,
+      gift_card_settlement_id: giftcardse.id,
+      gas_fee:
+        receipt &&
+        receipt.gasUsed !== undefined &&
+        (receipt.effectiveGasPrice !== undefined ||
+          receipt.gasPrice !== undefined)
+          ? parseFloat(
+              ethers.formatEther(
+                receipt.gasUsed *
+                  (receipt.effectiveGasPrice !== undefined
+                    ? receipt.effectiveGasPrice
+                    : receipt.gasPrice)
+              )
+            )
+          : 0,
+      tx_timestamp: new Date(),
+      created_at: new Date(),
+      updated_at: new Date(),
+    });
+
+    // e. Update GiftCardSettlement (optional: record transfer)
+    await GiftCardSettlement.update(
+      { to_addr: recipientAddress, updated_at: new Date() },
+      { where: { gift_card_id: giftCard.id } }
+    );
+
+    // f. Ensure GiftCardArtNft association exists (no change, but update timestamp if needed)
+
+    // g. Update user stats
+    // await Promise.all([
+    //   updateUserStats(wallet.address),
+    //   updateUserStats(recipient),
+    // ]);
+
     res.json({
       success: true,
       transactionHash: tx.hash,
-      etherscanUrl: `https://sepolia.etherscan.io/tx/${tx.hash}`,
+      basescanUrl: `https://sepolia.basescan.org/tx/${tx.hash}`,
+      giftCardId,
+      currentOwner: recipient,
     });
   } catch (error) {
     handleError(error, res);
   }
 });
 
-// Buy Gift Card
-app.post("/api/giftcard/buy", async (req, res) => {
-  try {
-    const { giftCardId, message, price } = req.body;
-    if (!giftCardId || !price) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing required fields: giftCardId and price are required.",
-      });
-    }
+// // Buy Gift Card
+// app.post("/api/giftcard/buy", async (req, res) => {
+//   try {
+//     const { giftCardId, message, price } = req.body;
+//     if (!giftCardId || !price) {
+//       return res.status(400).json({
+//         success: false,
+//         error: "Missing required fields: giftCardId and price are required.",
+//       });
+//     }
 
-    const tx = await contract.buyGiftCard(giftCardId, message, {
-      value: ethers.parseEther(price),
-    });
-    const receipt = await tx.wait();
+//     const tx = await contract.buyGiftCard(giftCardId, message, {
+//       value: ethers.parseEther(price),
+//     });
+//     const receipt = await tx.wait();
 
-    // Update database
-    const giftCard = await GiftCard.findByPk(giftCardId);
-    if (giftCard) {
-      await giftCard.update({
-        currentOwner: wallet.address,
-        message: message || giftCard.message,
-      });
+//     // Update database
+//     const giftCard = await GiftCard.findByPk(giftCardId);
+//     if (giftCard) {
+//       await giftCard.update({
+//         currentOwner: wallet.address,
+//         message: message || giftCard.message,
+//       });
 
-      // Record transaction
-      await Transaction.create({
-        giftCardId,
-        fromAddress: giftCard.creatorAddress,
-        toAddress: wallet.address,
-        transactionType: "PURCHASE",
-        amount: price,
-      });
-    }
+//       // Record transaction
+//       await Transaction.create({
+//         giftCardId,
+//         fromAddress: giftCard.creatorAddress,
+//         toAddress: wallet.address,
+//         transactionType: "PURCHASE",
+//         amount: price,
+//       });
+//     }
 
-    await Promise.all([
-      updateUserStats(wallet.address),
-      updateUserStats(giftCard.currentOwner),
-    ]);
-    res.json({ success: true, transactionHash: tx.hash });
-  } catch (error) {
-    handleError(error, res);
-  }
-});
+//     await Promise.all([
+//       updateUserStats(wallet.address),
+//       updateUserStats(giftCard.currentOwner),
+//     ]);
+//     res.json({ success: true, transactionHash: tx.hash });
+//   } catch (error) {
+//     handleError(error, res);
+//   }
+// });
 
 // Get All Transactions for a Gift Card
 app.get("/api/giftcard/:id/transactions", async (req, res) => {
@@ -1321,67 +1537,147 @@ app.get("/api/giftcard/:id/transactions", async (req, res) => {
 // Claim Gift Card
 app.post("/api/giftcard/claim", async (req, res) => {
   try {
-    const { giftCardId, secret } = req.body;
-    if (!giftCardId || !secret) {
+    console.log("Claiming gift card with data:", req.body);
+    console.log("Wallet address:", wallet.address);
+    const { giftCardId, secret, claimerAddress } = req.body;
+    if (!giftCardId || !secret || !claimerAddress) {
       return res.status(400).json({
         success: false,
-        error: "Missing required fields: giftCardId and secret are required.",
+        error:
+          "Missing required fields: giftCardId, secret, and claimerAddress are required.",
       });
     }
-
-    console.log("🔹 Claiming Gift Card on blockchain:", { giftCardId });
-    const tx = await contract.claimGiftCard(giftCardId, secret);
-    const receipt = await tx.wait();
-    console.log("🔍 Transaction Receipt:", receipt);
-
-    // Find the GiftCardClaimed event
-    const event = receipt.logs.find(
-      (log) => log.fragment && log.fragment.name === "GiftCardClaimed"
-    );
-    if (!event) {
+    // Find the gift card
+    const giftCard = await GiftCard.findByPk(giftCardId);
+    if (!giftCard) {
+      return res.status(404).json({
+        success: false,
+        error: "Gift card not found",
+      });
+    }
+    // Find the secret hash
+    const giftCardSecret = await GiftCardSecret.findOne({
+      where: { gift_card_id: giftCardId },
+    });
+    if (!giftCardSecret) {
+      return res.status(400).json({
+        success: false,
+        error: "No secret set for this gift card.",
+      });
+    }
+    console.log("Gift card secret hash:", giftCardSecret.secret_hash);
+    const onChainGiftCard = await contract.giftCards(giftCardId);
+    console.log("On-chain hash:", onChainGiftCard.secretHash);
+    // Claim on-chain first
+    let receipt, transactionHash;
+    try {
+      tx = await contract.claimGiftCard(giftCardId, secret);
+      receipt = await tx.wait();
+      transactionHash = receipt.blockHash || receipt.transactionHash;
+      console.log("Claim gift card transaction receipt:", receipt);
+      if (!receipt || !receipt.status) {
+        throw new Error("Transaction failed or was reverted");
+      }
+    } catch (error) {
       return res.status(500).json({
         success: false,
-        error: "GiftCardClaimed event not found in transaction receipt.",
+        error:
+          "Failed to claim gift card on-chain: " + (error.message || error),
       });
     }
+    // Update GiftCard: set current_owner
 
-    // Only update DB if on-chain claim succeeded
-    const giftCard = await GiftCard.findByPk(giftCardId);
-    if (giftCard) {
-      await giftCard.update({
-        currentOwner: wallet.address,
-        isClaimable: false,
-        secretHash: null,
-      });
-
-      // Record transaction
-      await Transaction.create({
-        giftCardId,
-        fromAddress: giftCard.creatorAddress,
-        toAddress: wallet.address,
-        transactionType: "CLAIM",
-        amount: 0,
-        transactionHash: tx.hash,
+    // Record blockchain transaction
+    let txCategory = await BlockchainTransactionCategory.findOne({
+      where: { name: "CLAIM_GIFT_CARD" },
+    });
+    if (!txCategory) {
+      txCategory = await BlockchainTransactionCategory.create({
+        name: "CLAIM_GIFT_CARD",
       });
     }
+    const giftcardse = await GiftCardSettlement.findOne({
+      where: { gift_card_id: giftCardId },
+    });
+    if (!giftcardse) {
+      return res.status(404).json({
+        success: false,
+        error: "Gift card settlement not found for this gift card.",
+      });
+    }
+    const claimerAddressLower = claimerAddress.toLowerCase();
+    console.log(
+      "Recording blockchain transaction for claim with address:",
+      giftCard.issuer_address,
+      "to",
+      claimerAddressLower
+    );
 
-    await Promise.all([
-      updateUserStats(wallet.address),
-      updateUserStats(giftCard.creatorAddress),
-    ]);
-    res.json({
+    await BlockchainTransaction.create({
+      tx_hash: transactionHash,
+      blockchain_tx_id: txCategory.id,
+      from_addr: giftCard.issuer_address,
+      to_addr: claimerAddressLower,
+      gift_card_settlement_id: giftcardse.id, // Set if you have settlement logic
+      gas_fee:
+        receipt &&
+        receipt.gasUsed !== undefined &&
+        (receipt.effectiveGasPrice !== undefined ||
+          receipt.gasPrice !== undefined)
+          ? parseFloat(
+              ethers.formatEther(
+                receipt.gasUsed *
+                  (receipt.effectiveGasPrice !== undefined
+                    ? receipt.effectiveGasPrice
+                    : receipt.gasPrice)
+              )
+            )
+          : 0,
+      tx_timestamp: new Date(),
+      created_at: new Date(),
+      updated_at: new Date(),
+    });
+
+    await giftCard.update({
+      updated_at: new Date(),
+      issuer_address: claimerAddress, // Update issuer address to claimer
+    });
+    // Ensure User exists for claimer
+    let user = await User.findOne({
+      where: { wallet_address: claimerAddress },
+    });
+    if (!user) {
+      await User.create({ wallet_address: claimerAddress });
+    }
+    await GiftCardSettlement.update(
+      { to_addr: claimerAddress, updated_at: new Date() },
+      { where: { gift_card_id: giftCard.id } }
+    );
+    const gcan = await GiftCardArtNft.findOne({
+      where: { gift_card_id: giftCardId },
+    });
+    if (gcan) {
+      // No-op, but could update timestamp if needed
+      await gcan.save();
+    }
+    return res.json({
       success: true,
       transactionHash: tx.hash,
-      etherscanUrl: `https://sepolia.etherscan.io/tx/${tx.hash}`,
+      giftCardId,
+      currentOwner: claimerAddress,
     });
   } catch (error) {
-    handleError(error, res);
+    console.error("Claim gift card error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to claim gift card",
+    });
   }
 });
 
 // Helper function to update user statistics
 async function updateUserStats(walletAddress) {
-  const user = await User.findOne({ where: { walletAddress } });
+  const user = await User.findOne({ where: { wallet_address: walletAddress } });
   if (!user) return;
 
   const [createdCount, sentCount, receivedCount, mintedCount] =
@@ -1399,7 +1695,7 @@ async function updateUserStats(walletAddress) {
           transactionType: "TRANSFER",
         },
       }),
-      Background.count({ where: { artistAddress: walletAddress } }),
+      ArtNft.count({ where: { artistAddress: walletAddress } }),
     ]);
 
   await user.update({
@@ -1407,14 +1703,15 @@ async function updateUserStats(walletAddress) {
     totalGiftCardsSent: sentCount,
     totalGiftCardsReceived: receivedCount,
     totalBackgroundsMinted: mintedCount,
-    lastLoginAt: new Date(),
+    updated_at: new Date(),
   });
 }
 
 // User Registration/Update
 app.post("/api/user", async (req, res) => {
   try {
-    const { walletAddress, username, email, bio, profileImageUrl } = req.body;
+    const { walletAddress, username, email, roleId, bio, profileImageUrl } =
+      req.body;
     if (!walletAddress) {
       return res.status(400).json({
         success: false,
@@ -1423,26 +1720,29 @@ app.post("/api/user", async (req, res) => {
     }
 
     // Try to find existing user
-    let user = await User.findOne({ where: { walletAddress } });
+    let user = await User.findOne({ where: { wallet_address: walletAddress } });
 
     if (user) {
       // Update existing user
       await user.update({
         username: username || user.username,
         email: email || user.email,
+        role_id: roleId || user.role_id,
         bio: bio || user.bio,
         profileImageUrl: profileImageUrl || user.profileImageUrl,
-        lastLoginAt: new Date(),
+        updated_at: new Date(),
       });
     } else {
       // Create new user
       user = await User.create({
-        walletAddress,
+        wallet_address: walletAddress,
         username,
         email,
+        role_id: roleId || 1,
+        created_at: new Date(),
+        updated_at: new Date(),
         bio,
         profileImageUrl,
-        lastLoginAt: new Date(),
       });
     }
 
@@ -1450,7 +1750,7 @@ app.post("/api/user", async (req, res) => {
     await updateUserStats(walletAddress);
 
     // Get updated user data
-    user = await User.findOne({ where: { walletAddress } });
+    user = await User.findOne({ where: { wallet_address: walletAddress } });
 
     res.json({
       success: true,
@@ -1466,7 +1766,7 @@ app.post("/api/user", async (req, res) => {
 app.get("/api/user/:walletAddress", async (req, res) => {
   try {
     const user = await User.findOne({
-      where: { walletAddress: req.params.walletAddress },
+      where: { wallet_address: req.params.walletAddress },
     });
 
     if (!user) {
@@ -1487,15 +1787,15 @@ app.get("/api/user/:walletAddress", async (req, res) => {
       // Gift cards created by user
       GiftCard.findAll({
         where: { creatorAddress: req.params.walletAddress },
-        include: [{ model: Background }],
+        include: [{ model: ArtNft }],
       }),
       // Gift cards currently owned by user
       GiftCard.findAll({
         where: { currentOwner: req.params.walletAddress },
-        include: [{ model: Background }],
+        include: [{ model: ArtNft }],
       }),
       // Backgrounds minted by user
-      Background.findAll({
+      ArtNft.findAll({
         where: { artistAddress: req.params.walletAddress },
       }),
       // Gift card transfers sent by user
@@ -1507,7 +1807,7 @@ app.get("/api/user/:walletAddress", async (req, res) => {
         include: [
           {
             model: GiftCard,
-            include: [{ model: Background }],
+            include: [{ model: ArtNft }],
           },
         ],
       }),
@@ -1520,7 +1820,7 @@ app.get("/api/user/:walletAddress", async (req, res) => {
         include: [
           {
             model: GiftCard,
-            include: [{ model: Background }],
+            include: [{ model: ArtNft }],
           },
         ],
       }),
@@ -1573,7 +1873,7 @@ app.get("/api/user/:walletAddress", async (req, res) => {
 app.delete("/api/user/:walletAddress", async (req, res) => {
   try {
     const user = await User.findOne({
-      where: { walletAddress: req.params.walletAddress },
+      where: { wallet_address: req.params.walletAddress },
     });
 
     if (!user) {
@@ -1617,7 +1917,7 @@ app.get("/api/backgrounds/category/:category", async (req, res) => {
       include: [
         {
           model: User,
-          attributes: ["username", "walletAddress", "profileImageUrl"],
+          attributes: ["username", "walletAddress", "email"],
         },
       ],
     });
@@ -1636,7 +1936,7 @@ app.get("/api/backgrounds/popular", async (req, res) => {
       include: [
         {
           model: User,
-          attributes: ["username", "walletAddress", "profileImageUrl"],
+          attributes: ["username", "walletAddress", "email"],
         },
       ],
     });
@@ -1655,7 +1955,7 @@ app.get("/api/transactions/recent", async (req, res) => {
       include: [
         {
           model: GiftCard,
-          include: [{ model: Background }],
+          include: [{ model: ArtNft }],
         },
       ],
     });
@@ -1681,7 +1981,7 @@ app.get("/api/users/search", async (req, res) => {
         [Op.or]: [
           { username: { [Op.iLike]: `%${query}%` } },
           { email: { [Op.iLike]: `%${query}%` } },
-          { walletAddress: { [Op.iLike]: `%${query}%` } },
+          { wallet_address: { [Op.iLike]: `%${query}%` } },
         ],
       },
       limit: 10,
@@ -1707,7 +2007,7 @@ app.get("/api/users/:walletAddress/activity", async (req, res) => {
       include: [
         {
           model: GiftCard,
-          include: [{ model: Background }],
+          include: [{ model: ArtNft }],
         },
       ],
     });
@@ -1791,7 +2091,7 @@ app.get("/api/transactions/recent", async (req, res) => {
       include: [
         {
           model: GiftCard,
-          include: [{ model: Background }],
+          include: [{ model: ArtNft }],
         },
       ],
     });
@@ -1870,7 +2170,7 @@ app.get("/api/users/:walletAddress/activity", async (req, res) => {
           include: [
             {
               model: GiftCard,
-              include: [{ model: Background }],
+              include: [{ model: ArtNft }],
             },
           ],
           order: [["createdAt", "DESC"]],
@@ -1914,7 +2214,7 @@ app.get("/api/profile/:walletAddress", async (req, res) => {
           [Op.ne]: walletAddress, // Not equal to user's address
         },
       },
-      include: [{ model: Background }],
+      include: [{ model: ArtNft }],
       order: [["createdAt", "DESC"]],
     });
 
@@ -1926,7 +2226,7 @@ app.get("/api/profile/:walletAddress", async (req, res) => {
           [Op.ne]: walletAddress, // Not equal to user's address
         },
       },
-      include: [{ model: Background }],
+      include: [{ model: ArtNft }],
       order: [["createdAt", "DESC"]],
     });
 
@@ -1943,6 +2243,104 @@ app.get("/api/profile/:walletAddress", async (req, res) => {
   }
 });
 
+// Set secret key for gift card (RESTful style)
+app.post("/api/gift-cards/:id/set-secret", async (req, res) => {
+  try {
+    const giftCardId = req.params.id;
+    const { secret, ownerAddress, artNftId } = req.body;
+    if (!secret || !giftCardId) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing required fields: giftCardId and secret are required.",
+      });
+    }
+    // Find the gift card
+    const giftCard = await GiftCard.findByPk(giftCardId);
+    if (!giftCard) {
+      return res.status(404).json({
+        success: false,
+        error: "Gift card not found",
+      });
+    }
+    // Optionally check owner (if provided)
+    if (ownerAddress && giftCard.currentOwner !== ownerAddress) {
+      return res.status(403).json({
+        success: false,
+        error: "Unauthorized - only the owner can set the secret key",
+      });
+    }
+    // Set secret on-chain first
+    let receipt;
+    try {
+      tx = await contract.setSecretKey(giftCardId, secret);
+      receipt = await tx.wait();
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        error: "Failed to set secret on-chain: " + (error.message || error),
+      });
+    }
+    // Hash the secret for DB
+    const secretHash = ethers.keccak256(ethers.toUtf8Bytes(secret));
+    // Create or update GiftCardSecret
+    await GiftCardSecret.upsert({
+      giftCardId: giftCardId,
+      secretHash,
+    });
+    await giftCard.save();
+    // Record blockchain transaction
+    let txCategory = await BlockchainTransactionCategory.findOne({
+      where: { name: "SET_GIFT_CARD_SECRET" },
+    });
+    if (!txCategory) {
+      txCategory = await BlockchainTransactionCategory.create({
+        name: "SET_GIFT_CARD_SECRET",
+      });
+    }
+    await BlockchainTransaction.create({
+      tx_hash: tx.hash,
+      blockchain_tx_id: txCategory.id,
+      from_addr: giftCard.currentOwner,
+      to_addr: null,
+      tx_timestamp: new Date(),
+    });
+    // Optionally create GiftCardArtNft association if artNftId provided
+    if (artNftId) {
+      await GiftCardArtNft.upsert({
+        gift_card_id: giftCardId,
+        art_nft_id: artNftId,
+        updated_at: new Date(),
+      });
+    }
+    // Optionally create GiftCardSettlement (not required for secret, but for completeness)
+    await GiftCardSettlement.upsert({
+      gift_card_id: giftCardId,
+      from_addr: giftCard.currentOwner,
+      to_addr: null,
+      tax_fee: 0,
+      tax_rate: 0,
+    });
+    // Ensure User exists for currentOwner
+    let user = await User.findOne({
+      where: { walletAddress: giftCard.currentOwner },
+    });
+    if (!user) {
+      await User.create({ walletAddress: giftCard.currentOwner });
+    }
+    return res.json({
+      success: true,
+      transactionHash: tx.hash,
+      giftCardId,
+    });
+  } catch (error) {
+    console.error("Set gift card secret error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to set gift card secret",
+    });
+  }
+});
+
 // Global request logging middleware
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
@@ -1952,7 +2350,7 @@ app.use((req, res, next) => {
 // Legacy route - redirect to the new implementation
 app.post("/api/giftcard/set-secret", async (req, res) => {
   try {
-    const { giftCardId, secret } = req.body;
+    const { giftCardId, secret, ownerAddress, artNftId } = req.body;
 
     // Forward the request to the new route
     console.log(
@@ -1961,7 +2359,7 @@ app.post("/api/giftcard/set-secret", async (req, res) => {
 
     // Make an internal request to the correct route
     req.url = `/api/gift-cards/set-secret`;
-    req.body = { giftCardId, secret };
+    req.body = { giftCardId, secret, ownerAddress, artNftId };
 
     // Continue processing with the routes middleware
     return app._router.handle(req, res);
@@ -1996,7 +2394,109 @@ function imageExists(imageUrl) {
 // Add this helper function to the app object for use in routes
 app.imageExists = imageExists;
 
+// Add Alchemy Mainnet provider for .cb.id resolution
+const cbidProvider = new ethers.JsonRpcProvider(
+  `https://eth-mainnet.g.alchemy.com/v2/${process.env.ENS_API_KEY}`
+);
+
+// POST /api/resolve-cbid
+app.post("/api/resolve-cbid", async (req, res) => {
+  const { name } = req.body;
+  if (!name) {
+    return res.status(400).json({ error: "Missing 'name' in request body" });
+  }
+  try {
+    const address = await cbidProvider.resolveName(name);
+    if (address) {
+      console.log(`${name} resolves to: ${address}`);
+      return res.json({ name, address });
+    } else {
+      console.log(`${name} is not registered or not resolvable.`);
+      return res
+        .status(404)
+        .json({ error: `${name} is not registered or not resolvable.` });
+    }
+  } catch (err) {
+    console.error("Error resolving ENS name:", err);
+    return res
+      .status(500)
+      .json({ error: "Error resolving ENS name", details: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
+
+function getTx() {
+  return tx;
+}
+
+// New endpoint to transfer gift card by base username
+app.post("/api/giftcard/transfer-by-baseusername", async (req, res) => {
+  try {
+    const { giftCardId, baseUsername } = req.body;
+    if (!giftCardId || !baseUsername) {
+      return res.status(400).json({
+        success: false,
+        error: "giftCardId and baseUsername are required.",
+      });
+    }
+
+    // Resolve the base username to wallet address using the local /api/resolve-cbid endpoint
+    let resolvedAddress;
+    try {
+      console.log(`Resolving base username: ${baseUsername}`);
+      // Call the local resolve-cbid endpoint directly
+      const cbidRes = await fetch(`${process.env.BASE_URL}/api/resolve-cbid`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: baseUsername }),
+      }).then((res) => res.json());
+
+      if (!cbidRes || !cbidRes.address) {
+        return res.status(404).json({
+          success: false,
+          error: `Could not resolve wallet address for base username: ${baseUsername}`,
+          details: `cbidRes: ${JSON.stringify(cbidRes)}`,
+        });
+      }
+      resolvedAddress = cbidRes.address.toLowerCase();
+    } catch (err) {
+      return res.status(500).json({
+        success: false,
+        error: "Failed to resolve base username",
+        details: err.message,
+      });
+    }
+
+    // Call the direct transfer API with the resolved address
+    try {
+      const transferRes = await fetch(
+        `${process.env.BASE_URL}/api/giftcard/transfer`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ giftCardId, recipient: resolvedAddress }),
+        }
+      ).then((res) => res.json());
+
+      return res.json(transferRes);
+    } catch (err) {
+      return res.status(500).json({
+        success: false,
+        error: "Failed to transfer gift card",
+        details: err.message,
+      });
+    }
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: "Unexpected error in transfer-by-baseusername",
+      details: error.message,
+    });
+  }
+});
+
+module.exports = { getTx };

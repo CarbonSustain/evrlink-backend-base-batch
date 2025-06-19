@@ -164,4 +164,4 @@ const claimGiftCard = async (giftCardId: string, secret: string): Promise<any> =
     throw error;
   }
 };
-``` 
+```
