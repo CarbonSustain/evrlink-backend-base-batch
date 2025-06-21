@@ -1786,42 +1786,42 @@ app.get("/api/user/:walletAddress", async (req, res) => {
     ] = await Promise.all([
       // Gift cards created by user
       GiftCard.findAll({
-        where: { creatorAddress: req.params.walletAddress },
+        where: { creator_address: req.params.walletAddress },
         include: [{ model: ArtNft }],
       }),
       // Gift cards currently owned by user
       GiftCard.findAll({
-        where: { currentOwner: req.params.walletAddress },
+        where: { issuer_address: req.params.walletAddress },
         include: [{ model: ArtNft }],
       }),
       // Backgrounds minted by user
       ArtNft.findAll({
-        where: { artistAddress: req.params.walletAddress },
+        where: { artist_address: req.params.walletAddress },
       }),
       // Gift card transfers sent by user
-      Transaction.findAll({
+      GiftCardSettlement.findAll({
         where: {
-          fromAddress: req.params.walletAddress,
-          transactionType: "TRANSFER",
+          from_addr: req.params.walletAddress,
         },
         include: [
           {
             model: GiftCard,
             include: [{ model: ArtNft }],
           },
+          // Optionally include BlockchainTransactionGiftCard if you want transaction details
         ],
       }),
       // Gift card transfers received by user
-      Transaction.findAll({
+      GiftCardSettlement.findAll({
         where: {
-          toAddress: req.params.walletAddress,
-          transactionType: "TRANSFER",
+          to_addr: req.params.walletAddress,
         },
         include: [
           {
             model: GiftCard,
             include: [{ model: ArtNft }],
           },
+          // Optionally include BlockchainTransactionGiftCard if you want transaction details
         ],
       }),
     ]);
@@ -1839,16 +1839,16 @@ app.get("/api/user/:walletAddress", async (req, res) => {
     const transferHistory = {
       sent: sentTransactions.map((tx) => ({
         transactionId: tx.id,
-        giftCardId: tx.giftCardId,
-        recipient: tx.toAddress,
-        timestamp: tx.createdAt,
+        giftCardId: tx.gift_card_id,
+        recipient: tx.to_addr,
+        timestamp: tx.created_at,
         giftCard: tx.GiftCard,
       })),
       received: receivedTransactions.map((tx) => ({
         transactionId: tx.id,
-        giftCardId: tx.giftCardId,
-        sender: tx.fromAddress,
-        timestamp: tx.createdAt,
+        giftCardId: tx.gift_card_id,
+        sender: tx.from_addr,
+        timestamp: tx.created_at,
         giftCard: tx.GiftCard,
       })),
     };
@@ -2207,28 +2207,88 @@ app.get("/api/profile/:walletAddress", async (req, res) => {
     }
 
     // Find received cards (where user is current owner but not creator)
-    const receivedCards = await GiftCard.findAll({
-      where: {
-        currentOwner: walletAddress,
-        creatorAddress: {
-          [Op.ne]: walletAddress, // Not equal to user's address
+    const receivedCardsRaw = await GiftCardArtNft.findAll({
+      include: [
+        {
+          model: GiftCard,
+          where: {
+            issuer_address: walletAddress,
+            creator_address: { [Op.ne]: walletAddress },
+          },
         },
-      },
-      include: [{ model: ArtNft }],
-      order: [["createdAt", "DESC"]],
+        {
+          model: ArtNft,
+        },
+      ],
+      order: [["created_at", "DESC"]],
     });
 
     // Find sent cards (where user is creator but not current owner)
-    const sentCards = await GiftCard.findAll({
-      where: {
-        creatorAddress: walletAddress,
-        currentOwner: {
-          [Op.ne]: walletAddress, // Not equal to user's address
+    const sentCardsRaw = await GiftCardArtNft.findAll({
+      include: [
+        {
+          model: GiftCard,
+          where: {
+            creator_address: walletAddress,
+            issuer_address: { [Op.ne]: walletAddress },
+          },
         },
-      },
-      include: [{ model: ArtNft }],
-      order: [["createdAt", "DESC"]],
+        {
+          model: ArtNft,
+        },
+      ],
+      order: [["created_at", "DESC"]],
     });
+
+    // Map/flatten for frontend
+    const mapCard = (row, status) => {
+      // Support both possible keys due to Sequelize association naming
+      const giftCardInstance = row.gift_card || row.GiftCard || {};
+      const artNftInstance =
+        row.ArtNft || row.art_nft || giftCardInstance.ArtNft || {};
+
+      // Convert Sequelize instances to plain objects
+      const giftCard =
+        typeof giftCardInstance.get === "function"
+          ? giftCardInstance.get()
+          : giftCardInstance;
+      const artNft =
+        typeof artNftInstance.get === "function"
+          ? artNftInstance.get()
+          : artNftInstance;
+
+      console.log(`Mapping Card: ${giftCard}`);
+      return {
+        id: giftCard.id,
+        imageUrl: artNft.image_uri || "",
+        senderName: giftCard.creator_address
+          ? giftCard.creator_address.slice(0, 6) +
+            "..." +
+            giftCard.creator_address.slice(-4)
+          : "",
+        recipientName: giftCard.issuer_address
+          ? giftCard.issuer_address.slice(0, 6) +
+            "..." +
+            giftCard.issuer_address.slice(-4)
+          : "",
+        message: giftCard.message || "",
+        amount: giftCard.price ? `${giftCard.price} USDC` : "",
+        date: giftCard.created_at
+          ? new Date(giftCard.created_at).toISOString().split("T")[0]
+          : "",
+        status,
+        creatorAddress: giftCard.creator_address,
+        currentOwner: giftCard.issuer_address,
+        backgroundUrl: artNft.image_uri,
+        createdAt: giftCard.created_at,
+        price: giftCard.price,
+      };
+    };
+
+    const receivedCards = receivedCardsRaw.map((row) =>
+      mapCard(row, "Received")
+    );
+    const sentCards = sentCardsRaw.map((row) => mapCard(row, "Sent"));
 
     res.json({
       success: true,
@@ -2242,7 +2302,6 @@ app.get("/api/profile/:walletAddress", async (req, res) => {
     handleError(error, res);
   }
 });
-
 // Set secret key for gift card (RESTful style)
 app.post("/api/gift-cards/:id/set-secret", async (req, res) => {
   try {

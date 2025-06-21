@@ -31,5 +31,7 @@ const GiftCardArtNft = sequelize.define(
 
 GiftCardArtNft.belongsTo(GiftCard, { foreignKey: "gift_card_id" });
 GiftCardArtNft.belongsTo(ArtNft, { foreignKey: "art_nft_id" });
+GiftCard.hasMany(GiftCardArtNft, { foreignKey: "gift_card_id" });
+ArtNft.hasMany(GiftCardArtNft, { foreignKey: "art_nft_id" });
 
 module.exports = GiftCardArtNft;
