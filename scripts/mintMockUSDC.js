@@ -7,7 +7,7 @@ async function main() {
   const MockUSDC = await ethers.getContractFactory("MockUSDC");
   const usdc = MockUSDC.attach("0x4cdf78D4947aF64A9f2b2DDce73e08f336DFea7A");
 
-  const recipient = "0x44bf9abc4ee99ecc3e7a856e3e1cb8086edc7897";
+  const recipient = "0xb459Fa28bB622F9Aa45764008F98173A25da0158";
   const mintAmount = ethers.parseUnits("10000000"); // 10 USDC with 6 decimals
 
   console.log("Minting 10 USDC to address:", recipient);
