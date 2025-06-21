@@ -169,12 +169,14 @@ router.post(
       const climateRate = constants?.climate_rate;
       console.log("artNftPricesUSDC:", artNftPricesUSDC); // Calculate USDC fees
       // artNftPricesUSDC = artNftPricesUSDC * 1e6; // Convert to smallest unit (6 decimals)
-      const backgroundTotalPriceUSDC = Array.isArray(artNftPricesUSDC)
-        ? artNftPricesUSDC.reduce(
-            (acc, v) => acc + BigInt(Math.floor(Number(v) * 1e6)),
-            BigInt(0)
-          )
-        : BigInt(0);
+      // Convert all artNftPricesUSDC to smallest unit (6 decimals) if not already
+      const artNftPricesUSDCInSmallest = Array.isArray(artNftPricesUSDC)
+        ? artNftPricesUSDC.map((v) => BigInt(Math.floor(Number(v) * 1e6)))
+        : [];
+      const backgroundTotalPriceUSDC =
+        artNftPricesUSDCInSmallest.length > 0
+          ? artNftPricesUSDCInSmallest.reduce((acc, v) => acc + v, BigInt(0))
+          : BigInt(0);
       const platformFeeUSDC = BigInt(Math.round(platformFee * 1e6));
       const taxFeeUSDC =
         (BigInt(Math.floor(Number(taxRate) * 1e6)) * backgroundTotalPriceUSDC) /
@@ -236,6 +238,44 @@ router.post(
         try {
           console.log("Creating gift card on blockchain...");
           if (paymentMethod === "usdc") {
+            // USDC: check allowance before calling createGiftCardWithUSDC
+            const usdcAddress = process.env.USDC_TOKEN_ADDRESS;
+            const usdcAbi = [
+              "function allowance(address owner, address spender) view returns (uint256)",
+              "function approve(address spender, uint256 amount) returns (bool)",
+              "function balanceOf(address account) view returns (uint256)",
+            ];
+            const userAddress = req.user.walletAddress;
+            console.log("User address:", userAddress);
+            const contractAddress = await req.app.contract.getAddress();
+            console.log("Contract address:", contractAddress);
+            const usdc = new ethers.Contract(
+              usdcAddress,
+              usdcAbi,
+              req.app.wallet.provider
+            );
+            console.log("USDC contract initialized:", usdcAddress);
+            const totalUSDC =
+              backgroundTotalPriceUSDC +
+              taxFeeUSDC +
+              climateFeeUSDC +
+              platformFeeUSDC;
+            console.log("Total USDC:", totalUSDC.toString());
+            const allowance = await usdc.allowance(
+              userAddress,
+              contractAddress
+            );
+            console.log("USDC allowance:", allowance.toString());
+            if (BigInt(allowance) < BigInt(totalUSDC)) {
+              return res.status(400).json({
+                success: false,
+                error: `Insufficient USDC allowance. Please approve at least ${(
+                  Number(totalUSDC) / 1e6
+                ).toFixed(
+                  6
+                )} USDC for the contract before creating a gift card.`,
+              });
+            }
             // USDC: call createGiftCardWithUSDC
             const tx = await req.app.contract.createGiftCardWithUSDC(
               backgroundIds,
