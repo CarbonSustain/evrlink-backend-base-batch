@@ -266,14 +266,19 @@ router.post(
               contractAddress
             );
             console.log("USDC allowance:", allowance.toString());
+            // Fix: Show allowance in human-readable USDC (6 decimals)
             if (BigInt(allowance) < BigInt(totalUSDC)) {
               return res.status(400).json({
                 success: false,
-                error: `Insufficient USDC allowance. Please approve at least ${(
-                  Number(totalUSDC) / 1e6
-                ).toFixed(
+                error: `Insufficient USDC allowance. Your wallet allowance for the contract is ${(
+                  Number(allowance) / 1e6
+                ).toFixed(6)} USDC, but ${(Number(totalUSDC) / 1e6).toFixed(
                   6
-                )} USDC for the contract before creating a gift card.`,
+                )} USDC is required. Please approve at least this amount for the contract before creating a gift card.`,
+                details: {
+                  required: (Number(totalUSDC) / 1e6).toFixed(6),
+                  currentAllowance: (Number(allowance) / 1e6).toFixed(6),
+                },
               });
             }
             // USDC: call createGiftCardWithUSDC
@@ -847,6 +852,36 @@ router.post(
       let transactionHash = null;
       let receipt = null;
 
+      // --- On-chain owner check before transfer ---
+      if (BLOCKCHAIN_ENABLED && req.app.contract) {
+        try {
+          const onChainGiftCard = await req.app.contract.giftCards(giftCardId);
+          const onChainOwner =
+            onChainGiftCard.currentOwner ||
+            onChainGiftCard.current_owner ||
+            onChainGiftCard.owner;
+          // Compare on-chain owner with DB owner (issuer_address)
+          if (
+            !onChainOwner ||
+            onChainOwner.toLowerCase() !== giftCard.issuer_address.toLowerCase()
+          ) {
+            return res.status(400).json({
+              error:
+                "Blockchain error: Only the on-chain owner can transfer this gift card. The DB owner does not match the on-chain owner.",
+              details: {
+                onChainOwner,
+                dbOwner: giftCard.issuer_address,
+              },
+            });
+          }
+        } catch (err) {
+          return res.status(500).json({
+            error: "Failed to fetch on-chain gift card owner.",
+            details: err.message,
+          });
+        }
+      }
+
       // Handle blockchain transaction if enabled
       if (BLOCKCHAIN_ENABLED) {
         try {
@@ -857,6 +892,17 @@ router.post(
           receipt = await tx.wait();
           transactionHash = receipt.transactionHash || tx.hash;
         } catch (blockchainError) {
+          // Improved error for "Only owner can transfer"
+          if (
+            blockchainError.reason &&
+            blockchainError.reason.includes("Only owner can transfer")
+          ) {
+            return res.status(400).json({
+              error:
+                "Blockchain error: Only the on-chain owner can transfer this gift card. Please ensure the backend wallet is the current on-chain owner.",
+              details: blockchainError.reason,
+            });
+          }
           console.error("Blockchain error:", blockchainError);
           return res.status(500).json({
             error: "Blockchain transaction failed",
