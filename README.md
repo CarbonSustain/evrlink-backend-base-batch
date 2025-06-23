@@ -1,9 +1,13 @@
 # Evrlink2 Backend
 
 ## Overview
-Evrlink2 is a backend application designed to manage an NFT gift marketplace. It allows users to mint backgrounds as NFTs, create gift cards, and facilitate transactions between users. The application is built using Node.js, Express, and MySQL.
+
+Evrlink2 is a backend application for managing an NFT gift marketplace. It enables users to mint NFT backgrounds, create and transfer gift cards, and handle transactions. The backend is built with **Node.js**, **Express**, and **MySQL**, and integrates with **Ethereum smart contracts (Solidity)**.
+
+---
 
 ## Project Structure
+
 ```
 evrlink2-backend
 ├── db
@@ -21,139 +25,151 @@ evrlink2-backend
 │       ├── GiftCard.js
 │       ├── Transaction.js
 │       └── User.js
-├── package.json
+├── contracts
+│   └── GiftCard.sol
+├── scripts
+│   └── deploy.js
+├── test
+│   └── NFTGiftMarketplace.test.js
 ├── .env
-└── README.md
+├── package.json
+├── README.md
+└── server.js
 ```
 
-## Setup Instructions
+---
 
-1. **Clone the Repository**
-   ```bash
-   git clone <repository-url>
-   cd evrlink2-backend
-   ```
+## Getting Started
 
-2. **Install Dependencies**
-   Make sure you have Node.js and npm installed. Then run:
-   ```bash
-   npm install
-   ```
+### 1. Clone the Repository
 
-3. **Configure Environment Variables**
-   Create a `.env` file in the root directory and add your database connection details:
-   ```
-   DB_HOST=your_database_host
-   DB_USER=your_database_user
-   DB_PASSWORD=your_database_password
-   DB_NAME=your_database_name
-   ```
+```bash
+git clone <repository-url>
+cd evrlink2-backend
+```
 
-4. **Run Database Migrations**
-   Execute the SQL commands to create the necessary tables:
-   ```bash
-   mysql -u your_database_user -p your_database_name < db/migrations/001_create_tables.sql
-   ```
+### 2. Install Dependencies
 
-5. **Seed the Database**
-   Optionally, you can populate the database with initial data:
-   ```bash
-   mysql -u your_database_user -p your_database_name < db/seeds/seed_data.sql
-   ```
+```bash
+npm install
+```
 
-6. **Start the Application**
-   Run the application using:
-   ```bash
-   node src/app.js
-   ```
+### 3. Configure Environment Variables
 
-## Smart Contract Development and Deployment
+Create a `.env` file in the root directory with the following:
 
-### Prerequisites
-- Hardhat environment setup
-- Sepolia testnet ETH (get from a Sepolia faucet)
-- Alchemy or Infura API key for Sepolia network access
-- MetaMask wallet with private key
-
-### Environment Setup
-Create a `.env` file in the root directory with the following variables:
-```env
-SEPOLIA_RPC_URL=https://eth-sepolia.g.alchemy.com/v2/YOUR-API-KEY
+```
+DB_HOST=your_database_host
+DB_USER=your_database_user
+DB_PASSWORD=your_database_password
+DB_NAME=your_database_name
+SEPOLIA_RPC_URL=https://base-sepolia.g.alchemy.com/v2/YOUR-API-KEY
 PRIVATE_KEY=your-metamask-wallet-private-key
 ETHERSCAN_API_KEY=your-etherscan-api-key
+CONTRACT_ADDRESS=your_deployed_contract_address
+FRONTEND_DIST_PATH=/absolute/path/to/your/frontend/dist # Optional
 ```
 
-### Compile Smart Contracts
+### 4. Database Setup
+
+**Run migrations:**
+
 ```bash
-# Navigate to the backend directory
-cd Evrlink-backend
-
-# Install dependencies (if not done already)
-npm install
-
-# Compile the smart contracts
-npm run compile
+mysql -u your_database_user -p your_database_name < db/migrations/001_create_tables.sql
 ```
 
-### Deploy Smart Contracts
-1. Make sure you have Sepolia testnet ETH in your wallet
-2. Deploy to Sepolia testnet:
-```bash
-npm run deploy:sepolia
-```
-3. After deployment, copy the contract address and update it in:
-   - Frontend `.env` file as `REACT_APP_CONTRACT_ADDRESS`
-   - Backend `.env` file as `CONTRACT_ADDRESS`
+**(Optional) Seed the database:**
 
-### Verify Contract (Optional)
 ```bash
-npx hardhat verify --network sepolia <DEPLOYED_CONTRACT_ADDRESS>
+mysql -u your_database_user -p your_database_name < db/seeds/seed_data.sql
 ```
 
-### Testing Smart Contracts
+### 5. Start the Backend
+
 ```bash
-# Run all smart contract tests
+node src/app.js
+```
+
+---
+
+## Smart Contract Development & Deployment
+
+- Contracts are in the `contracts/` directory (e.g., `GiftCard.sol`).
+- Use [Hardhat](https://hardhat.org/) for compiling and deploying contracts.
+
+**Compile contracts:**
+
+```bash
+npx hardhat compile
+```
+
+**Deploy to Base Sepolia:**
+
+1. Ensure your `.env` is set up with the correct RPC URL and private key.
+2. Run your deployment script:
+   ```bash
+   npx hardhat run scripts/deploy.js --network base_sepolia
+   ```
+3. Update the deployed contract address in your `.env` file.
+
+**Verify contract (optional):**
+
+```bash
+npx hardhat verify --network base_sepolia <DEPLOYED_CONTRACT_ADDRESS>
+```
+
+---
+
+## Testing
+
+**Backend tests:**
+
+```bash
 npm test
-
-# Run specific test file
-npx hardhat test test/GiftCard.test.js
 ```
 
-## Usage
-- The API endpoints are available for interacting with the NFT gift marketplace. You can use tools like Postman or curl to test the endpoints.
-- Refer to the API documentation for details on available routes and their functionalities.
+**Smart contract tests:**
+
+```bash
+npx hardhat test
+```
+
+---
+
+## API Usage
+
+- The backend exposes RESTful endpoints for authentication, user management, backgrounds, gift cards, images, wallet, and NFTs.
+- See [API_DOCUMENTATION.md](./API_DOCUMENTATION.md) for detailed endpoint info, request/response formats, and examples.
+
+---
 
 ## Frontend Integration
-When running the frontend and backend in separate repositories, you can configure the backend to serve the frontend from any location by setting the `FRONTEND_DIST_PATH` environment variable:
 
-```
-# In your backend .env file
-FRONTEND_DIST_PATH=/absolute/path/to/your/frontend/dist
-```
+- The backend can serve the frontend build if you set the `FRONTEND_DIST_PATH` environment variable in `.env`.
+- If not set, defaults to `../frontend/dist`.
 
-This allows you to:
-1. Keep both repos completely separate
-2. Avoid hardcoded path references
-3. Configure different paths for development and production
+---
 
-If you don't set this variable, the server will look for the frontend at `../frontend/dist` relative to the backend directory.
+## Deployment
+
+- Ensure all environment variables are set for production.
+- Use a process manager like [PM2](https://pm2.keymetrics.io/) for running the server in production.
+- Secure your `.env` file and never commit secrets to version control.
+
+---
 
 ## Contributing
-Contributions are welcome! Please open an issue or submit a pull request for any enhancements or bug fixes.
+
+Contributions are welcome! Please open issues or submit pull requests for improvements or bug fixes.
+
+---
 
 ## License
-This project is licensed under the MIT License. See the LICENSE file for details.
 
-## API Documentation
+MIT License. See the `LICENSE` file for details.
 
-For detailed API documentation, see the [API_DOCUMENTATION.md](./API_DOCUMENTATION.md) file which contains information about available endpoints, request/response formats, and example code for integrating with the frontend.
+---
 
-The API follows REST principles with the following main resource endpoints:
+## Contact
 
-- `/api/auth` - Authentication endpoints
-- `/api/users` - User management 
-- `/api/backgrounds` - Background image management
-- `/api/gift-cards` - Gift card operations
-- `/api/images` - Image uploads and management
-- `/api/wallet` - Wallet operations
-- `/api/nfts` - NFT-related operations
+For questions or onboarding, please reach out to the project maintainer or check the internal documentation.
