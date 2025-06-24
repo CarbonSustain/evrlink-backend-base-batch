@@ -173,22 +173,22 @@ router.post(
       const artNftPricesUSDCInSmallest = Array.isArray(artNftPricesUSDC)
         ? artNftPricesUSDC.map((v) => BigInt(Math.floor(Number(v) * 1e6)))
         : [];
-      const backgroundTotalPriceUSDC =
+      let backgroundTotalPriceUSDC =
         artNftPricesUSDCInSmallest.length > 0
           ? artNftPricesUSDCInSmallest.reduce((acc, v) => acc + v, BigInt(0))
           : BigInt(0);
-      const platformFeeUSDC = BigInt(Math.round(platformFee * 1e6));
-      const taxFeeUSDC =
+      let platformFeeUSDC = BigInt(Math.round(platformFee * 1e6));
+      let taxFeeUSDC =
         (BigInt(Math.floor(Number(taxRate) * 1e6)) * backgroundTotalPriceUSDC) /
         BigInt(1e6);
-      const climateFeeUSDC =
-        (BigInt(Math.floor(Number(climateRate) * 1e6)) *
-          backgroundTotalPriceUSDC) /
+      let climateFeeUSDC =
+        (BigInt(Math.floor(Number(climateRate) * 1e6)) * platformFeeUSDC) /
         BigInt(1e6);
       console.log(
         "Background total price (USDC):",
         backgroundTotalPriceUSDC.toString()
       );
+      platformFeeUSDC = platformFeeUSDC - climateFeeUSDC;
 
       const totalPriceUSDC =
         backgroundTotalPriceUSDC +
@@ -238,6 +238,14 @@ router.post(
         try {
           console.log("Creating gift card on blockchain...");
           if (paymentMethod === "usdc") {
+            backgroundTotalPriceUSDC = BigInt(
+              Math.floor(Number(backgroundTotalPriceUSDC) * 1e18)
+            );
+            taxFeeUSDC = BigInt(Math.floor(Number(taxFeeUSDC) * 1e18));
+            climateFeeUSDC = BigInt(Math.floor(Number(climateFeeUSDC) * 1e18));
+            platformFeeUSDC = BigInt(
+              Math.floor(Number(platformFeeUSDC) * 1e18)
+            );
             // USDC: check allowance before calling createGiftCardWithUSDC
             const usdcAddress = process.env.USDC_TOKEN_ADDRESS;
             const usdcAbi = [
@@ -248,7 +256,9 @@ router.post(
             const userAddress = req.user.walletAddress;
             console.log("User address:", userAddress);
             const contractAddress = await req.app.contract.getAddress();
-            console.log("Contract address:", contractAddress);
+            console.log("Contract address (spender):", contractAddress); // Spender address for allowance
+            // Frontend: Also log/display the spender address (contract) for user reference.
+            // Example: https://etherscan.io/token/<USDC_TOKEN_ADDRESS>#writeContract#allowance
             const usdc = new ethers.Contract(
               usdcAddress,
               usdcAbi,
@@ -265,22 +275,45 @@ router.post(
               userAddress,
               contractAddress
             );
+            console.log(
+              `Checking allowance for owner: ${userAddress}, spender: ${contractAddress}`
+            );
             console.log("USDC allowance:", allowance.toString());
             // Fix: Show allowance in human-readable USDC (6 decimals)
             if (BigInt(allowance) < BigInt(totalUSDC)) {
               return res.status(400).json({
                 success: false,
                 error: `Insufficient USDC allowance. Your wallet allowance for the contract is ${(
-                  Number(allowance) / 1e6
-                ).toFixed(6)} USDC, but ${(Number(totalUSDC) / 1e6).toFixed(
+                  Number(allowance) / 1e18
+                ).toFixed(6)} USDC, but ${(Number(totalUSDC) / 1e18).toFixed(
                   6
                 )} USDC is required. Please approve at least this amount for the contract before creating a gift card.`,
                 details: {
-                  required: (Number(totalUSDC) / 1e6).toFixed(6),
-                  currentAllowance: (Number(allowance) / 1e6).toFixed(6),
+                  required: (Number(totalUSDC) / 1e18).toFixed(6),
+                  currentAllowance: (Number(allowance) / 1e18).toFixed(6),
                 },
               });
             }
+
+            // --- Add this block to check USDC balance ---
+            const balance = await usdc.balanceOf(userAddress);
+            console.log("USDC balance:", balance.toString());
+            if (BigInt(balance) < BigInt(totalUSDC)) {
+              return res.status(400).json({
+                success: false,
+                error: `Insufficient USDC balance. Your wallet balance is ${(
+                  Number(balance) / 1e18
+                ).toFixed(6)} USDC, but ${(Number(totalUSDC) / 1e18).toFixed(
+                  6
+                )} USDC is required to create this gift card.`,
+                details: {
+                  required: (Number(totalUSDC) / 1e18).toFixed(6),
+                  currentBalance: (Number(balance) / 1e18).toFixed(6),
+                },
+              });
+            }
+            // --- End balance check ---
+
             // USDC: call createGiftCardWithUSDC
             const tx = await req.app.contract.createGiftCardWithUSDC(
               backgroundIds,
@@ -466,9 +499,14 @@ router.post(
           gift_card_id: giftCard.id,
           from_addr: req.user.walletAddress,
           to_addr: recipientAddress || null,
-          evrlink_fee: Number(platformFeeUSDC) / 1e6, // Only store fee for ETH, not wei, or it will overflow bigintplatformFeeUSDC,
-          tax_fee: Number(taxFeeUSDC) / 1e6,
-          // climate_fee: parseFloat(climateFeeWei.toString()),
+          evrlink_fee:
+            paymentMethod === "usdc"
+              ? Number(platformFeeUSDC) / 1e18 // convert from smallest unit to human value
+              : Number(platformFeeUSDC) / 1e6,
+          tax_fee:
+            paymentMethod === "usdc"
+              ? Number(taxFeeUSDC) / 1e18
+              : Number(taxFeeUSDC) / 1e6,
           created_at: new Date(),
           updated_at: new Date(),
         },
