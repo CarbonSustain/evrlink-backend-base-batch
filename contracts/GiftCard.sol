@@ -172,7 +172,7 @@ contract NFTGiftMarketplace is ERC721URIStorage, Ownable {
 
     function claimGiftCard(uint32 giftCardId, string memory secret) external {
         GiftCard storage giftCard = giftCards[giftCardId];
-        //require(giftCard.secretHash == keccak256(abi.encodePacked(secret)), "Invalid secret");
+        require(giftCard.secretHash == keccak256(abi.encodePacked(secret)), "Invalid secret");
         giftCard.currentOwner = msg.sender;
         emit GiftCardClaimed(giftCardId, msg.sender);
     }
