@@ -1,37 +1,114 @@
-# Evrlink2 Backend
+# Evrlink Backend
 
 ## Overview
 
-Evrlink2 is a backend application for managing an NFT gift marketplace. It enables users to mint NFT backgrounds, create and transfer gift cards, and handle transactions. The backend is built with **Node.js**, **Express**, and **MySQL**, and integrates with **Ethereum smart contracts (Solidity)**.
+Evrlink is a backend application for managing an NFT gift marketplace. It enables users to mint NFT backgrounds, create and transfer gift cards, and handle transactions. The backend is built with **Node.js**, **Express**, and **PostgreSQL**, and integrates with **Ethereum smart contracts (Solidity)**. The project leverages a variety of tools for development, deployment, and testing.
+
+---
+
+## Tools & Technologies
+
+- **Node.js**: JavaScript runtime for backend logic.
+- **Express**: Web framework for RESTful APIs.
+- **MySQL**: Relational database for persistent storage.
+- **Sequelize**: ORM for database interaction.
+- **dotenv**: Environment variable management.
+- **Ethereum (Solidity)**: Smart contracts for NFT and gift card logic.
+- **Hardhat**: Ethereum development environment for compiling, deploying, and testing smart contracts.
+- **Ethers.js**: Ethereum wallet and contract interaction.
+- **Chai**: Testing framework for backend and smart contracts.
+- **CORS**: Security and logging middleware.
+- **Frontend Integration**: Serves a frontend build.
+
+---
+
+## Functionality
+
+- **User Management**: Register, authenticate, and manage users.
+- **NFT Backgrounds**: Mint, list, and manage NFT backgrounds.
+- **Gift Cards**: Create, transfer, and redeem NFT-based gift cards.
+- **Transactions**: Record and retrieve transaction history.
+- **Wallet Integration**: Connect and interact with Ethereum wallets.
+- **Smart Contract Interaction**: Mint NFTs, transfer ownership, and verify transactions on-chain.
+- **API Endpoints**: RESTful endpoints for all major resources.
+- **Frontend Serving**: Optionally serves a frontend SPA if configured.
+- **Testing**: Comprehensive backend and smart contract tests.
+- **Database Migration & Seeding**: Scripts for initializing and populating the database.
 
 ---
 
 ## Project Structure
 
-```
-evrlink2-backend
-├── db
-│   ├── migrations
-│   │   └── 001_create_tables.sql
-│   ├── seeds
-│   │   └── seed_data.sql
-│   └── db_config.js
+```text
+evrlink-backend-base-batch
+├── contracts
+│   ├── GiftCard.sol
+│   ├── MockUSDC.sol
+├── dist/
+│   └── services/
+│       └── onchain-agent/
+│           ├── create-agent.js
+│           └── prepare-agentkit.js
+├── evrlink_chatbot/
+├── scripts
+│   ├── deploy.js
+│   ├── deployMockUSDC.js
+│   ├── mintMockUSDC.js
+│   ├── uploadToS3.js
+│   └── usdc_deploy.js
+├── services
+│   ├── agent.service.js
+│   ├── blockchain.js
+│   ├── onchain-agent/
+│   │   ├── create-agent.js / .ts
+│   │   └── prepare-agentkit.js / .ts
+│   └── utils/
+│       ├── blockchain-updates.js
+│       └── crypto.js
 ├── src
 │   ├── app.js
-│   ├── controllers
+│   ├── server.js
+│   ├── contracts/
+│   │   └── GiftCard.json
+│   ├── controllers/
 │   │   └── dbController.js
-│   └── models
-│       ├── Background.js
-│       ├── GiftCard.js
-│       ├── Transaction.js
-│       └── User.js
-├── contracts
-│   └── GiftCard.sol
-├── scripts
-│   └── deploy.js
-├── test
+│   ├── middleware/
+│   │   ├── auth.js
+│   │   └── multer.js
+│   ├── models/
+│   │   ├── ArtNft.js
+│   │   ├── Background.js
+│   │   ├── BlockchainTransaction.js
+│   │   ├── BlockchainTransactionCategory.js
+│   │   ├── BlockchainTransactionGiftcard.js
+│   │   ├── EvrlinkConstant.js
+│   │   ├── GiftCard.js
+│   │   ├── GiftCardArtNft.js
+│   │   ├── GiftCardCategory.js
+│   │   ├── GiftCardSecret.js
+│   │   ├── GiftCardSettlement.js
+│   │   ├── Transaction.js
+│   │   ├── User.js
+│   │   ├── UserRole.js
+│   │   └── index.js
+│   ├── routes/
+│   │   ├── agent.routes.js
+│   │   ├── auth.routes.js
+│   │   ├── background.routes.js
+│   │   ├── backgrounds.js
+│   │   ├── chatbot.routes.js
+│   │   ├── giftCard.routes.js
+│   │   ├── image.routes.js
+│   │   ├── index.js
+│   │   ├── nft.routes.js
+│   │   ├── user.routes.js
+│   │   └── wallet.routes.js
+├── test/
+│   ├── Giftcard.test.js
 │   └── NFTGiftMarketplace.test.js
 ├── .env
+├── buildspec.yml
+├── config.js
 ├── package.json
 ├── README.md
 └── server.js
@@ -50,6 +127,8 @@ cd evrlink2-backend
 
 ### 2. Install Dependencies
 
+Installs all Node.js dependencies (backend, smart contract, and tooling):
+
 ```bash
 npm install
 ```
@@ -57,50 +136,15 @@ npm install
 ### 3. Configure Environment Variables
 
 Create a `.env` file in the root directory with the following:
-
-```
-DB_HOST=your_database_host
-DB_USER=your_database_user
-DB_PASSWORD=your_database_password
-DB_NAME=your_database_name
-SEPOLIA_RPC_URL=https://base-sepolia.g.alchemy.com/v2/YOUR-API-KEY
-PRIVATE_KEY=your-metamask-wallet-private-key
-ETHERSCAN_API_KEY=your-etherscan-api-key
-CONTRACT_ADDRESS=your_deployed_contract_address
-FRONTEND_DIST_PATH=/absolute/path/to/your/frontend/dist # Optional
-```
-
-### 4. Database Setup
-
-**Run migrations:**
-
-```bash
-mysql -u your_database_user -p your_database_name < db/migrations/001_create_tables.sql
-```
-
-**(Optional) Seed the database:**
-
-```bash
-mysql -u your_database_user -p your_database_name < db/seeds/seed_data.sql
-```
-
-### 5. Start the Backend
-
-```bash
-node src/app.js
-```
-
----
-
-## Smart Contract Development & Deployment
+### 5. Smart Contract Development & Deployment
 
 - Contracts are in the `contracts/` directory (e.g., `GiftCard.sol`).
-- Use [Hardhat](https://hardhat.org/) for compiling and deploying contracts.
+- Use [Hardhat](https://hardhat.org/) for compiling, deploying, and testing contracts.
 
 **Compile contracts:**
 
 ```bash
-npx hardhat compile
+npm run compile
 ```
 
 **Deploy to Base Sepolia:**
@@ -120,15 +164,52 @@ npx hardhat verify --network base_sepolia <DEPLOYED_CONTRACT_ADDRESS>
 
 ---
 
+## Running the Application
+
+### Development Mode
+
+Runs the backend with auto-reload on changes (if `nodemon` is installed):
+
+```bash
+npm run dev
+```
+
+### Production Mode
+
+Runs the backend server (ensure all environment variables are set):
+
+```bash
+npm start
+```
+
+Or, using PM2 for process management:
+
+```bash
+pm2 start src/app.js --name evrlink2-backend
+```
+
+### What Runs
+
+- **Backend API**: RESTful endpoints for all resources.
+- **Smart Contract Integration**: All NFT and gift card operations interact with the deployed smart contract.
+- **Database**: All persistent data is stored in MySQL.
+- **Frontend Serving**: If `FRONTEND_DIST_PATH` is set, the backend serves the frontend SPA.
+- **Logging & Security**: Middleware for logging requests and securing HTTP headers.
+- **Testing**: Run backend and smart contract tests as described below.
+
+---
+
 ## Testing
 
-**Backend tests:**
+**Backend tests:**  
+Runs all backend unit/integration tests (see `test/`):
 
 ```bash
 npm test
 ```
 
-**Smart contract tests:**
+**Smart contract tests:**  
+Runs all smart contract tests using Hardhat:
 
 ```bash
 npx hardhat test
@@ -136,24 +217,9 @@ npx hardhat test
 
 ---
 
-## API Usage
-
-- The backend exposes RESTful endpoints for authentication, user management, backgrounds, gift cards, images, wallet, and NFTs.
-- See [API_DOCUMENTATION.md](./API_DOCUMENTATION.md) for detailed endpoint info, request/response formats, and examples.
-
----
-
-## Frontend Integration
-
-- The backend can serve the frontend build if you set the `FRONTEND_DIST_PATH` environment variable in `.env`.
-- If not set, defaults to `../frontend/dist`.
-
----
-
 ## Deployment
 
 - Ensure all environment variables are set for production.
-- Use a process manager like [PM2](https://pm2.keymetrics.io/) for running the server in production.
 - Secure your `.env` file and never commit secrets to version control.
 
 ---
@@ -161,12 +227,6 @@ npx hardhat test
 ## Contributing
 
 Contributions are welcome! Please open issues or submit pull requests for improvements or bug fixes.
-
----
-
-## License
-
-MIT License. See the `LICENSE` file for details.
 
 ---
 

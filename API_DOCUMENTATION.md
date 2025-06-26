@@ -1,167 +1,215 @@
-# Evrlink API Documentation
+# Evrlink Backend API Documentation
+
+This document describes the available REST API endpoints for the Evrlink NFT Gift Marketplace backend.
+
+---
 
 ## Authentication
 
-All API endpoints require authentication unless specifically noted. Authentication is done via JWT tokens that are sent in the `Authorization` header.
+### POST `/api/auth/email-wallet`
+Associate an email with a wallet address or update user info.
 
-Example:
-```
-Authorization: Bearer <your_jwt_token>
-```
-
-## Gift Cards API
-
-### Set Secret Key for Gift Card
-
-Sets a secret key for a gift card to make it claimable with the secret key.
-
-**Endpoint 1 (Recommended RESTful style)**:
-```
-POST /api/gift-cards/:id/set-secret
-```
-
-**Path Parameters**:
-- `id`: The ID of the gift card
-
-**Request Body**:
+**Body:**
 ```json
 {
-  "secret": "your-secret-key"
+  "walletAddress": "0x...",
+  "email": "user@example.com",
+  "user_name": "username",
+  "role_id": 1
 }
 ```
+**Response:**  
+- `201 Created` or `200 OK` with user info
 
-**Endpoint 2 (Legacy style, for backward compatibility)**:
-```
-POST /api/gift-cards/set-secret
-```
+### GET `/api/auth/email-wallet?email=...`
+Get wallet address by email.
 
-**Request Body**:
+---
+
+## Email-Wallet Association (Legacy)
+
+### POST `/email-wallet`
+Associate an email with a wallet address (legacy/raw SQL).
+
+### GET `/email-wallet?email=...`
+Get wallet address by email (legacy/raw SQL).
+
+---
+
+## Agent
+
+### POST `/api/agent`
+Interact with the on-chain agent.
+
+**Body:**
 ```json
 {
-  "giftCardId": "123",
-  "secret": "your-secret-key"
+  "message": "Your message",
+  "userId": "optional"
 }
 ```
+**Response:**  
+- `{ "response": "Agent reply" }`
 
-**Endpoint 3 (Old legacy style, also supported)**:
-```
-POST /api/giftcard/set-secret
-```
+---
 
-**Request Body**:
-```json
-{
-  "giftCardId": "123",
-  "secret": "your-secret-key"
-}
-```
+## Art NFTs / Backgrounds
 
-**Response**:
-```json
-{
-  "success": true,
-  "id": "123",
-  "isClaimable": true,
-  "transactionHash": "0x123..." // Optional, only if blockchain is enabled
-}
-```
+### POST `/api/artnfts`
+Mint a new Art NFT (background).
 
-**Error Responses**:
+**Form Data:**  
+- `image`: image file (required)
+- `priceUsdc`: number (required)
+- `artistAddress`: string (required)
+- `giftCardId`: string (required)
+- `category`: string (optional)
 
-- `400 Bad Request`: Missing required fields
-- `404 Not Found`: Gift card not found
-- `403 Unauthorized`: User does not own the gift card
-- `500 Internal Server Error`: Server or blockchain error
+### GET `/api/backgrounds`
+List all backgrounds (Art NFTs), supports pagination and category filter.
 
-### Claim Gift Card with Secret Key
+### GET `/api/background/:id`
+Get background by ID.
 
-Claims a gift card using a secret key.
+### GET `/api/backgrounds/category/:category`
+Get backgrounds by category.
 
-**Endpoint**:
-```
-POST /api/gift-cards/:id/claim
-```
+### GET `/api/backgrounds/popular`
+Get popular backgrounds.
 
-**Path Parameters**:
-- `id`: The ID of the gift card
+### GET `/api/backgrounds/test`
+Test endpoint for backgrounds.
 
-**Request Body**:
-```json
-{
-  "secret": "your-secret-key"
-}
-```
+---
 
-**Response**:
-```json
-{
-  "success": true,
-  "id": "123",
-  "currentOwner": "0x123...",
-  "isClaimable": false
-}
-```
+## Gift Cards
 
-**Error Responses**:
+### POST `/api/giftcard/create` or `/api/gift-cards/create`
+Create a new gift card.
 
-- `400 Bad Request`: Missing required fields or invalid secret
-- `404 Not Found`: Gift card not found
-- `500 Internal Server Error`: Server or blockchain error
+**Body:**  
+- `backgroundId`, `price`, `message`, `creatorAddress`, `artNftId`, `secret`, `recipientAddress`
 
-## Frontend Implementation Examples
+### POST `/api/giftcard/price`
+Calculate required ETH for minting a gift card.
 
-### Setting a Secret Key
+**Body:**  
+- `backgroundId`, `price`
 
-```typescript
-// Using the RESTful API
-const setGiftCardSecret = async (giftCardId: string, secret: string): Promise<any> => {
-  try {
-    const response = await fetch(`/api/gift-cards/${giftCardId}/set-secret`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${localStorage.getItem('token')}`,
-      },
-      body: JSON.stringify({ secret }),
-    });
-    
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.error || 'Failed to set gift card secret');
-    }
-    
-    return await response.json();
-  } catch (error) {
-    console.error('Error setting gift card secret:', error);
-    throw error;
-  }
-};
-```
+### GET `/api/giftcards`
+List all gift cards (pagination and filters supported).
 
-### Claiming a Gift Card
+### GET `/api/giftcard/:id`
+Get gift card by ID.
 
-```typescript
-// Using the RESTful API
-const claimGiftCard = async (giftCardId: string, secret: string): Promise<any> => {
-  try {
-    const response = await fetch(`/api/gift-cards/${giftCardId}/claim`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${localStorage.getItem('token')}`,
-      },
-      body: JSON.stringify({ secret }),
-    });
-    
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.error || 'Failed to claim gift card');
-    }
-    
-    return await response.json();
-  } catch (error) {
-    console.error('Error claiming gift card:', error);
-    throw error;
-  }
-};
-```
+### GET `/api/giftcards/owner/:address`
+Get all gift cards owned by a wallet.
+
+### GET `/api/giftcards/creator/:address`
+Get all gift cards created by a wallet.
+
+### POST `/api/giftcard/transfer`
+Transfer a gift card to another wallet.
+
+**Body:**  
+- `giftCardId`, `recipient`
+
+### POST `/api/giftcard/transfer-by-baseusername`
+Transfer a gift card to a user by their base username.
+
+**Body:**  
+- `giftCardId`, `baseUsername`
+
+### POST `/api/giftcard/claim`
+Claim a gift card with a secret.
+
+**Body:**  
+- `giftCardId`, `secret`, `claimerAddress`
+
+### POST `/api/gift-cards/:id/set-secret`
+Set a secret for a gift card.
+
+**Body:**  
+- `secret`, `ownerAddress`, `artNftId` (optional)
+
+---
+
+## Transactions
+
+### GET `/api/giftcard/:id/transactions`
+Get all transactions for a gift card.
+
+### GET `/api/transactions/recent`
+Get recent gift card transactions.
+
+---
+
+## Users
+
+### POST `/api/user`
+Register or update a user.
+
+**Body:**  
+- `walletAddress`, `username`, `email`, `roleId`, `bio`, `profileImageUrl`
+
+### GET `/api/user/:walletAddress`
+Get user profile with detailed statistics.
+
+### DELETE `/api/user/:walletAddress`
+Delete a user.
+
+### GET `/api/users/top`
+Get top users by activity.
+
+### GET `/api/users/search?query=...`
+Search users by username, email, or wallet address.
+
+### GET `/api/users/:walletAddress/activity`
+Get user activity feed.
+
+### GET `/api/users`
+Get all users with pagination and sorting.
+
+---
+
+## Profiles
+
+### GET `/api/profile/:walletAddress`
+Get user profile with received and sent gift cards.
+
+---
+
+## Images
+
+### POST `/api/image/upload`
+Upload an image (for backgrounds or gift cards).
+
+---
+
+## ENS/CB.ID Resolution
+
+### POST `/api/resolve-cbid`
+Resolve a base username (cb.id) to a wallet address.
+
+**Body:**  
+- `name`: string
+
+---
+
+## Chatbot
+
+### POST `/api/chatbot/message`
+Send a message to the chatbot.
+
+**Body:**  
+- `message`: string
+
+---
+
+## Notes
+
+- All endpoints (except `/auth/email-wallet`, `/email-wallet`, `/api/resolve-cbid`, `/api/chatbot/message`) may require authentication.
+- Error responses are returned with appropriate HTTP status codes and a JSON error message.
+- For more details on request/response formats, see the source code or contact the maintainers.
+
+---

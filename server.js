@@ -491,60 +491,6 @@ app.post("/api/artnfts", upload.single("image"), async (req, res) => {
   }
 });
 
-// // Mint Background
-// app.post("/api/background/mint", async (req, res) => {
-//   try {
-//     const { imageURI, category, price } = req.body;
-//     if (!imageURI || !category || !price) {
-//       return res.status(400).json({ error: "Missing required fields" });
-//     }
-//     if (isNaN(price) || Number(price) <= 0) {
-//       return res.status(400).json({ error: "Invalid price" });
-//     }
-
-//     console.log("🔹 Minting Background:", { imageURI, category, price });
-//     const tx = await contract.mintBackground(
-//       imageURI,
-//       category,
-//       ethers.parseEther(price.toString())
-//     );
-//     const receipt = await tx.wait();
-//     console.log("🔍 Transaction Receipt:", receipt);
-
-//     const event = receipt.logs.find(
-//       (log) => log.fragment && log.fragment.name === "BackgroundMinted"
-//     );
-//     if (!event) {
-//       return res.status(500).json({
-//         success: false,
-//         error: "BackgroundMinted event not found in transaction receipt.",
-//       });
-//     }
-//     const backgroundId = event.args.backgroundId.toString();
-
-//     // Save to database using the blockchain ID
-//     const background = await Background.create({
-//       id: backgroundId, // Use blockchain ID
-//       artistAddress: wallet.address,
-//       imageURI,
-//       category,
-//       price,
-//     });
-
-//     console.log(`✅ Background Minted and Saved to DB - ID: ${backgroundId}`);
-//     await updateUserStats(wallet.address);
-//     res.json({
-//       success: true,
-//       transactionHash: tx.hash,
-//       basescanUrl: `https://sepolia.basescan.org/tx/${transactionHash}`,
-//       giftCardId,
-//       giftCard,
-//     });
-//   } catch (error) {
-//     handleError(error, res);
-//   }
-// });
-
 // Calculate required ETH for minting a gift card
 app.post("/api/giftcard/price", async (req, res) => {
   try {
